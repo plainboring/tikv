@@ -63,7 +63,7 @@ impl<E: Engine> Clone for Endpoint<E> {
 
 macro_rules! get_v {
     ($name:ident, $v:ident) => {
-        $name.cfg.$v.load(Ordering::Release)
+        $name.cfg.$v.load(Ordering::Relaxed)
     };
 }
 
