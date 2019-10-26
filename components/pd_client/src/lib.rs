@@ -78,7 +78,10 @@ pub const INVALID_ID: u64 = 0;
 /// cluster id in trait interface every time, so passing the cluster id when
 /// creating the PdClient is enough and the PdClient will use this cluster id
 /// all the time.
-pub trait PdClient: Send + Sync {
+pub trait PdClient: Send + Sync
+where
+    Self: Clone,
+{
     /// Returns the cluster ID.
     fn get_cluster_id(&self) -> Result<u64>;
 
@@ -103,7 +106,7 @@ pub trait PdClient: Send + Sync {
     fn alloc_id(&self) -> Result<u64>;
 
     /// Informs PD when the store starts or some store information changes.
-    fn put_store(&self, store: metapb::Store) -> Result<()>;
+    fn put_store(&self, store: metapb::Store, tikv_cfg: String) -> Result<()>;
 
     /// We don't need to support Region and Peer put/delete,
     /// because PD knows all Region and Peers itself:
@@ -167,7 +170,7 @@ pub trait PdClient: Send + Sync {
     ) -> PdFuture<pdpb::AskBatchSplitResponse>;
 
     /// Sends store statistics regularly.
-    fn store_heartbeat(&self, stats: pdpb::StoreStats) -> PdFuture<()>;
+    fn store_heartbeat(&self, stats: pdpb::StoreStats) -> PdFuture<pdpb::StoreHeartbeatResponse>;
 
     /// Reports PD the split Region.
     fn report_batch_split(&self, regions: Vec<metapb::Region>) -> PdFuture<()>;

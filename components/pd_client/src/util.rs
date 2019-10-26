@@ -80,6 +80,7 @@ impl Stream for HeartbeatReceiver {
 }
 
 /// A leader client doing requests asynchronous.
+#[derive(Clone)]
 pub struct LeaderClient {
     timer: Handle,
     inner: Arc<RwLock<Inner>>,

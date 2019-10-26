@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::transport::RaftStoreRouter;
 use super::RaftKv;
 use super::Result;
+use crate::config::TiKvConfig;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::dispatcher::CoprocessorHost;
 use crate::raftstore::store::fsm::store::StoreMeta;
@@ -50,6 +51,7 @@ pub struct Node<C: PdClient + 'static> {
     cluster_id: u64,
     store: metapb::Store,
     store_cfg: StoreConfig,
+    tikv_cfg: TiKvConfig,
     system: RaftBatchSystem,
     has_started: bool,
 
@@ -65,6 +67,7 @@ where
         system: RaftBatchSystem,
         cfg: &ServerConfig,
         store_cfg: &StoreConfig,
+        tikv_cfg: &TiKvConfig,
         pd_client: Arc<C>,
     ) -> Node<C> {
         let mut store = metapb::Store::default();
@@ -89,6 +92,7 @@ where
             cluster_id: cfg.cluster_id,
             store,
             store_cfg: store_cfg.clone(),
+            tikv_cfg: tikv_cfg.clone(),
             pd_client,
             system,
             has_started: false,
@@ -146,7 +150,8 @@ where
 
         // Put store only if the cluster is bootstrapped.
         info!("put store to PD"; "store" => ?&self.store);
-        self.pd_client.put_store(self.store.clone())?;
+        let tikv_cfg = ::toml::to_string(&self.tikv_cfg).unwrap();
+        self.pd_client.put_store(self.store.clone(), tikv_cfg)?;
 
         Ok(())
     }

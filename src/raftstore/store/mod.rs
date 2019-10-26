@@ -22,7 +22,10 @@ pub use self::bootstrap::{
     prepare_bootstrap_cluster,
 };
 pub use self::config::Config;
-pub use self::fsm::{new_compaction_listener, DestroyPeerJob, RaftRouter, StoreInfo};
+pub use self::fsm::{
+    new_compaction_listener, ApplyRouter, BatchRouter, DestroyPeerJob, Fsm, FsmTypes, Poller,
+    PoolHandlerBuilder, PoolState, RaftRouter, StoreInfo,
+};
 pub use self::msg::{
     Callback, CasualMessage, PeerMsg, PeerTicks, RaftCommand, ReadCallback, ReadResponse,
     SignificantMsg, StoreMsg, StoreTick, WriteCallback, WriteResponse,
