@@ -32,6 +32,7 @@ use uuid::Builder as UuidBuilder;
 
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::CoprocessorHost;
+use crate::raftstore::store::fsm::store::DynamicConfig;
 use crate::raftstore::store::fsm::{RaftPollerBuilder, RaftRouter};
 use crate::raftstore::store::metrics::*;
 use crate::raftstore::store::msg::{Callback, PeerMsg};
@@ -2782,7 +2783,7 @@ impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
 #[derive(Clone)]
 pub struct Builder {
     tag: String,
-    cfg: Arc<Config>,
+    cfg: DynamicConfig,
     coprocessor_host: Arc<CoprocessorHost>,
     importer: Arc<SSTImporter>,
     region_scheduler: Scheduler<RegionTask>,
@@ -2815,7 +2816,7 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
 
     fn build(&self) -> ApplyPoller {
         ApplyPoller {
-            msg_buf: Vec::with_capacity(self.cfg.messages_per_tick),
+            msg_buf: Vec::with_capacity(self.cfg.get().messages_per_tick),
             apply_ctx: ApplyContext::new(
                 self.tag.clone(),
                 self.coprocessor_host.clone(),
@@ -2824,9 +2825,9 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
                 self.engines.clone(),
                 self.router.clone(),
                 self.sender.clone(),
-                &self.cfg,
+                &*self.cfg.get(),
             ),
-            messages_per_tick: self.cfg.messages_per_tick,
+            messages_per_tick: self.cfg.get().messages_per_tick,
         }
     }
 }

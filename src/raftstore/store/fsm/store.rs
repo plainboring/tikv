@@ -59,6 +59,8 @@ use crate::storage::kv::{CompactedEvent, CompactionListener};
 use engine::Engines;
 use engine::{Iterable, Mutable, Peekable};
 use pd_client::PdClient;
+use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
 use tikv_util::collections::{HashMap, HashSet};
 use tikv_util::mpsc::{self, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, SlowTimer};
@@ -189,8 +191,17 @@ impl RaftRouter {
     }
 }
 
+#[derive(Clone)]
+pub struct DynamicConfig(pub Arc<RwLock<Config>>);
+
+impl DynamicConfig {
+    pub fn get<'a>(&'a self) -> RwLockReadGuard<'a, Config> {
+        self.0.read().unwrap()
+    }
+}
+
 pub struct PollContext<T, C: 'static> {
-    pub cfg: Arc<Config>,
+    pub cfg: DynamicConfig,
     pub store: metapb::Store,
     pub pd_scheduler: FutureScheduler<PdTask>,
     pub consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
@@ -502,7 +513,7 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         fail_point!("raft_between_save");
         if !self.poll_ctx.raft_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
-            write_opts.set_sync(self.poll_ctx.cfg.sync_log || self.poll_ctx.sync_log);
+            write_opts.set_sync(self.poll_ctx.cfg.get().sync_log || self.poll_ctx.sync_log);
             self.poll_ctx
                 .engines
                 .raft
@@ -536,8 +547,8 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         let dur = self.timer.elapsed();
         if !self.poll_ctx.store_stat.is_busy {
             let election_timeout = Duration::from_millis(
-                self.poll_ctx.cfg.raft_base_tick_interval.as_millis()
-                    * self.poll_ctx.cfg.raft_election_timeout_ticks as u64,
+                self.poll_ctx.cfg.get().raft_base_tick_interval.as_millis()
+                    * self.poll_ctx.cfg.get().raft_election_timeout_ticks as u64,
             );
             if dur >= election_timeout {
                 self.poll_ctx.store_stat.is_busy = true;
@@ -679,7 +690,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
 
 #[derive(Clone)]
 pub struct RaftPollerBuilder<T, C> {
-    pub cfg: Arc<Config>,
+    pub cfg: DynamicConfig,
     pub store: metapb::Store,
     pd_scheduler: FutureScheduler<PdTask>,
     consistency_check_scheduler: Scheduler<ConsistencyCheckTask>,
@@ -754,7 +765,7 @@ impl<T, C> RaftPollerBuilder<T, C> {
 
             let (tx, mut peer) = box_try!(PeerFsm::create(
                 store_id,
-                &self.cfg,
+                &*self.cfg.get(),
                 self.region_scheduler.clone(),
                 self.engines.clone(),
                 region,
@@ -791,7 +802,7 @@ impl<T, C> RaftPollerBuilder<T, C> {
             info!("region is applying snapshot"; "region" => ?region, "store_id" => store_id);
             let (tx, mut peer) = PeerFsm::create(
                 store_id,
-                &self.cfg,
+                &*self.cfg.get(),
                 self.region_scheduler.clone(),
                 self.engines.clone(),
                 &region,
@@ -908,13 +919,14 @@ where
             queued_snapshot: HashSet::default(),
             current_time: None,
         };
+        let t = ctx.cfg.get().messages_per_tick;
         RaftPoller {
             tag: format!("[store {}]", ctx.store.get_id()),
-            store_msg_buf: Vec::with_capacity(ctx.cfg.messages_per_tick),
-            peer_msg_buf: Vec::with_capacity(ctx.cfg.messages_per_tick),
+            store_msg_buf: Vec::with_capacity(t),
+            peer_msg_buf: Vec::with_capacity(t),
             previous_metrics: ctx.raft_metrics.clone(),
             timer: SlowTimer::new(),
-            messages_per_tick: ctx.cfg.messages_per_tick,
+            messages_per_tick: t,
             poll_ctx: ctx,
             pending_proposals: Vec::new(),
         }
@@ -984,7 +996,7 @@ impl RaftBatchSystem {
                 .build(),
         };
         let mut builder = RaftPollerBuilder {
-            cfg: Arc::new(cfg),
+            cfg: DynamicConfig(Arc::new(RwLock::new(cfg))),
             store: meta,
             engines,
             router: self.router.clone(),
@@ -1086,9 +1098,9 @@ impl RaftBatchSystem {
         let region_runner = RegionRunner::new(
             engines.clone(),
             snap_mgr,
-            cfg.snap_apply_batch_size.0 as usize,
-            cfg.use_delete_range,
-            cfg.clean_stale_peer_delay.0,
+            cfg.get().snap_apply_batch_size.0 as usize,
+            cfg.get().use_delete_range,
+            cfg.get().clean_stale_peer_delay.0,
         );
         let timer = RegionRunner::new_timer();
         box_try!(workers.region_worker.start_with_timer(region_runner, timer));
@@ -1106,6 +1118,7 @@ impl RaftBatchSystem {
         let cleanup_runner = CleanupRunner::new(compact_runner, cleanup_sst_runner);
         box_try!(workers.cleanup_worker.start(cleanup_runner));
 
+        let dyn_cfg = raft_builder.cfg.clone();
         let raft_pool = self
             .system
             .build_pool_state(PoolHandlerBuilder::Raft(raft_builder))
@@ -1115,7 +1128,8 @@ impl RaftBatchSystem {
             .build_pool_state(PoolHandlerBuilder::Apply(apply_builder))
             .unwrap();
         let (raft_router, apply_router) = (self.router.clone(), self.apply_router.clone());
-        let config_runner = ConfigRunner::new(apply_router, apply_pool, raft_router, raft_pool);
+        let config_runner =
+            ConfigRunner::new(dyn_cfg, apply_router, apply_pool, raft_router, raft_pool);
         box_try!(workers.config_worker.start(config_runner));
 
         let pd_runner = PdRunner::new(
@@ -1125,7 +1139,7 @@ impl RaftBatchSystem {
             Arc::clone(&engines.kv),
             workers.pd_worker.scheduler(),
             workers.config_worker.scheduler(),
-            cfg.pd_store_heartbeat_tick_interval.as_secs(),
+            cfg.get().pd_store_heartbeat_tick_interval.as_secs(),
         );
         box_try!(workers.pd_worker.start(pd_runner));
 
@@ -1426,7 +1440,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
         // New created peers should know it's learner or not.
         let (tx, peer) = PeerFsm::replicate(
             self.ctx.store_id(),
-            &self.ctx.cfg,
+            &self.ctx.cfg.get(),
             self.ctx.region_scheduler.clone(),
             self.ctx.engines.clone(),
             region_id,
@@ -1452,7 +1466,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
         } else {
             0
         };
-        if total_bytes_declined < self.ctx.cfg.region_split_check_diff.0
+        if total_bytes_declined < self.ctx.cfg.get().region_split_check_diff.0
             || total_bytes_declined * 10 < event.total_input_bytes
         {
             return;
@@ -1469,7 +1483,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             calc_region_declined_bytes(
                 event,
                 &meta.region_ranges,
-                self.ctx.cfg.region_split_check_diff.0 / 16,
+                self.ctx.cfg.get().region_split_check_diff.0 / 16,
             )
         };
 
@@ -1490,7 +1504,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
     fn register_compact_check_tick(&self) {
         self.ctx.schedule_store_tick(
             StoreTick::CompactCheck,
-            self.ctx.cfg.region_compact_check_interval.0,
+            self.ctx.cfg.get().region_compact_check_interval.0,
         )
     }
 
@@ -1514,7 +1528,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 
         // Start from last checked key.
         let mut ranges_need_check =
-            Vec::with_capacity(self.ctx.cfg.region_compact_check_step as usize + 1);
+            Vec::with_capacity(self.ctx.cfg.get().region_compact_check_step as usize + 1);
         ranges_need_check.push(self.fsm.store.last_compact_checked_key.clone());
 
         let largest_key = {
@@ -1534,7 +1548,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             ));
             ranges_need_check.extend(
                 left_ranges
-                    .take(self.ctx.cfg.region_compact_check_step as usize)
+                    .take(self.ctx.cfg.get().region_compact_check_step as usize)
                     .map(|(k, _)| k.to_owned()),
             );
 
@@ -1560,8 +1574,8 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             CompactTask::CheckAndCompact {
                 cf_names,
                 ranges: ranges_need_check,
-                tombstones_num_threshold: self.ctx.cfg.region_compact_min_tombstones,
-                tombstones_percent_threshold: self.ctx.cfg.region_compact_tombstones_percent,
+                tombstones_num_threshold: self.ctx.cfg.get().region_compact_min_tombstones,
+                tombstones_percent_threshold: self.ctx.cfg.get().region_compact_tombstones_percent,
             },
         )) {
             error!(
@@ -1627,7 +1641,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
 
         let store_info = StoreInfo {
             engine: Arc::clone(&self.ctx.engines.kv),
-            capacity: self.ctx.cfg.capacity.0,
+            capacity: self.ctx.cfg.get().capacity.0,
         };
 
         let task = PdTask::StoreHeartbeat { stats, store_info };
@@ -1725,7 +1739,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
             .stat
             .lock_cf_bytes_written
             .load(Ordering::SeqCst);
-        if lock_cf_bytes_written > self.ctx.cfg.lock_cf_compact_bytes_threshold.0 {
+        if lock_cf_bytes_written > self.ctx.cfg.get().lock_cf_compact_bytes_threshold.0 {
             self.ctx
                 .global_stat
                 .stat
@@ -1756,19 +1770,21 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
     fn register_pd_store_heartbeat_tick(&self) {
         self.ctx.schedule_store_tick(
             StoreTick::PdStoreHeartbeat,
-            self.ctx.cfg.pd_store_heartbeat_tick_interval.0,
+            self.ctx.cfg.get().pd_store_heartbeat_tick_interval.0,
         );
     }
 
     fn register_snap_mgr_gc_tick(&self) {
-        self.ctx
-            .schedule_store_tick(StoreTick::SnapGc, self.ctx.cfg.snap_mgr_gc_tick_interval.0)
+        self.ctx.schedule_store_tick(
+            StoreTick::SnapGc,
+            self.ctx.cfg.get().snap_mgr_gc_tick_interval.0,
+        )
     }
 
     fn register_compact_lock_cf_tick(&self) {
         self.ctx.schedule_store_tick(
             StoreTick::CompactLockCf,
-            self.ctx.cfg.lock_cf_compact_interval.0,
+            self.ctx.cfg.get().lock_cf_compact_interval.0,
         )
     }
 }
@@ -1869,7 +1885,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
     fn register_consistency_check_tick(&mut self) {
         self.ctx.schedule_store_tick(
             StoreTick::ConsistencyCheck,
-            self.ctx.cfg.consistency_check_interval.0,
+            self.ctx.cfg.get().consistency_check_interval.0,
         )
     }
 
@@ -1937,7 +1953,7 @@ impl<'a, T: Transport, C: PdClient> StoreFsmDelegate<'a, T, C> {
     fn register_cleanup_import_sst_tick(&self) {
         self.ctx.schedule_store_tick(
             StoreTick::CleanupImportSST,
-            self.ctx.cfg.cleanup_import_sst_interval.0,
+            self.ctx.cfg.get().cleanup_import_sst_interval.0,
         )
     }
 

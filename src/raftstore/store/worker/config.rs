@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::raftstore::store::fsm::{
-    ApplyControlFsm, ApplyFsm, PeerFsm, PoolHandlerBuilder, StoreFsm,
+    ApplyControlFsm, ApplyFsm, DynamicConfig, PeerFsm, PoolHandlerBuilder, StoreFsm,
 };
 use crate::raftstore::store::{BatchRouter, Fsm, FsmTypes, Poller, PoolState};
 use tikv_util::worker::Runnable;
@@ -139,6 +139,7 @@ where
 }
 
 pub struct Runner<T, C> {
+    cfg: DynamicConfig,
     apply_pool: PoolControl<ApplyFsm, ApplyControlFsm, T, C>,
     raft_pool: PoolControl<PeerFsm, StoreFsm, T, C>,
 }
@@ -149,6 +150,7 @@ where
     C: PdClient + 'static,
 {
     pub fn new(
+        cfg: DynamicConfig,
         apply_router: BatchRouter<ApplyFsm, ApplyControlFsm>,
         apply_state: PoolState<ApplyFsm, ApplyControlFsm, T, C>,
         raft_router: BatchRouter<PeerFsm, StoreFsm>,
@@ -157,6 +159,7 @@ where
         let apply_pool = PoolControl::new(apply_router, apply_state);
         let raft_pool = PoolControl::new(raft_router, raft_state);
         Runner {
+            cfg,
             apply_pool,
             raft_pool,
         }
@@ -188,6 +191,7 @@ where
         match task {
             Task::Update { cfg } => {
                 debug!("received config change request: {:?}", cfg);
+                let c = self.cfg.0.write().unwrap();
             }
             _ => {}
         }
