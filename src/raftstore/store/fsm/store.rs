@@ -1138,6 +1138,7 @@ impl RaftBatchSystem {
             apply_pool,
             raft_router,
             raft_pool,
+            engines.clone(),
         );
         box_try!(workers.config_worker.start(config_runner));
 
