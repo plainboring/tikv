@@ -21,6 +21,21 @@ use tikv_util::Either;
 use crate::coprocessor::metrics::*;
 use crate::coprocessor::tracker::Tracker;
 use crate::coprocessor::*;
+use std::sync::atomic::*;
+use std::sync::{Arc, RwLock};
+
+pub struct EndpointConfig {
+    /// The recursion limit when parsing Coprocessor Protobuf requests.
+    recursion_limit: AtomicU32,
+
+    batch_row_limit: AtomicUsize,
+    stream_batch_row_limit: AtomicUsize,
+    stream_channel_size: AtomicUsize,
+    enable_batch_if_possible: AtomicBool,
+
+    /// The soft time limit of handling Coprocessor requests.
+    max_handle_duration: RwLock<Duration>,
+}
 
 /// A pool to build and run Coprocessor request handlers.
 pub struct Endpoint<E: Engine> {
@@ -29,16 +44,7 @@ pub struct Endpoint<E: Engine> {
     read_pool_normal: FuturePool,
     read_pool_low: FuturePool,
 
-    /// The recursion limit when parsing Coprocessor Protobuf requests.
-    recursion_limit: u32,
-
-    batch_row_limit: usize,
-    stream_batch_row_limit: usize,
-    stream_channel_size: usize,
-    enable_batch_if_possible: bool,
-
-    /// The soft time limit of handling Coprocessor requests.
-    max_handle_duration: Duration,
+    cfg: Arc<EndpointConfig>,
 
     _phantom: PhantomData<E>,
 }
@@ -49,9 +55,16 @@ impl<E: Engine> Clone for Endpoint<E> {
             read_pool_high: self.read_pool_high.clone(),
             read_pool_normal: self.read_pool_normal.clone(),
             read_pool_low: self.read_pool_low.clone(),
+            cfg: Arc::clone(&self.cfg),
             ..*self
         }
     }
+}
+
+macro_rules! get_v {
+    ($name:ident, $v:ident) => {
+        $name.cfg.$v.load(Ordering::Relaxed)
+    };
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -62,18 +75,26 @@ impl<E: Engine> Endpoint<E> {
         let read_pool_normal = read_pool.remove(1);
         let read_pool_low = read_pool.remove(0);
 
+        let cfg = EndpointConfig {
+            recursion_limit: AtomicU32::new(cfg.end_point_recursion_limit),
+            batch_row_limit: AtomicUsize::new(cfg.end_point_batch_row_limit),
+            enable_batch_if_possible: AtomicBool::new(cfg.end_point_enable_batch_if_possible),
+            stream_batch_row_limit: AtomicUsize::new(cfg.end_point_stream_batch_row_limit),
+            stream_channel_size: AtomicUsize::new(cfg.end_point_stream_channel_size),
+            max_handle_duration: RwLock::new(cfg.end_point_request_max_handle_duration.0),
+        };
+
         Self {
             read_pool_high,
             read_pool_normal,
             read_pool_low,
-            recursion_limit: cfg.end_point_recursion_limit,
-            batch_row_limit: cfg.end_point_batch_row_limit,
-            enable_batch_if_possible: cfg.end_point_enable_batch_if_possible,
-            stream_batch_row_limit: cfg.end_point_stream_batch_row_limit,
-            stream_channel_size: cfg.end_point_stream_channel_size,
-            max_handle_duration: cfg.end_point_request_max_handle_duration.0,
+            cfg: Arc::new(cfg),
             _phantom: Default::default(),
         }
+    }
+
+    pub fn get_cfg(&self) -> Arc<EndpointConfig> {
+        Arc::clone(&self.cfg)
     }
 
     fn get_read_pool(&self, priority: kvrpcpb::CommandPri) -> &FuturePool {
@@ -103,7 +124,7 @@ impl<E: Engine> Endpoint<E> {
         );
 
         let mut is = CodedInputStream::from_bytes(&data);
-        is.set_recursion_limit(self.recursion_limit);
+        is.set_recursion_limit(get_v!(self, recursion_limit));
 
         let req_ctx: ReqContext;
         let builder: RequestHandlerBuilder<E::Snap>;
@@ -126,13 +147,13 @@ impl<E: Engine> Endpoint<E> {
                     make_tag(table_scan),
                     context,
                     ranges.as_slice(),
-                    self.max_handle_duration,
+                    *self.cfg.max_handle_duration.read().unwrap(),
                     peer,
                     Some(is_desc_scan),
                     Some(dag.get_start_ts()),
                 );
                 let batch_row_limit = self.get_batch_row_limit(is_streaming);
-                let enable_batch_if_possible = self.enable_batch_if_possible;
+                let enable_batch_if_possible = get_v!(self, enable_batch_if_possible);
                 builder = Box::new(move |snap, req_ctx: &ReqContext| {
                     // TODO: Remove explicit type once rust-lang#41078 is resolved
                     let store = SnapshotStore::new(
@@ -160,7 +181,7 @@ impl<E: Engine> Endpoint<E> {
                     make_tag(table_scan),
                     context,
                     ranges.as_slice(),
-                    self.max_handle_duration,
+                    *self.cfg.max_handle_duration.read().unwrap(),
                     peer,
                     None,
                     Some(analyze.get_start_ts()),
@@ -179,7 +200,7 @@ impl<E: Engine> Endpoint<E> {
                     make_tag(table_scan),
                     context,
                     ranges.as_slice(),
-                    self.max_handle_duration,
+                    *self.cfg.max_handle_duration.read().unwrap(),
                     peer,
                     None,
                     Some(checksum.get_start_ts()),
@@ -199,9 +220,9 @@ impl<E: Engine> Endpoint<E> {
     #[inline]
     fn get_batch_row_limit(&self, is_streaming: bool) -> usize {
         if is_streaming {
-            self.stream_batch_row_limit
+            get_v!(self, stream_batch_row_limit)
         } else {
-            self.batch_row_limit
+            get_v!(self, batch_row_limit)
         }
     }
 
@@ -419,7 +440,7 @@ impl<E: Engine> Endpoint<E> {
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
     ) -> Result<impl Stream<Item = coppb::Response, Error = Error>> {
-        let (tx, rx) = mpsc::channel::<Result<coppb::Response>>(self.stream_channel_size);
+        let (tx, rx) = mpsc::channel::<Result<coppb::Response>>(get_v!(self, stream_channel_size));
         let read_pool = self.get_read_pool(req_ctx.context.get_priority());
         let tracker = Box::new(Tracker::new(req_ctx));
 

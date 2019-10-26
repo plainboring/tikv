@@ -1,7 +1,9 @@
-// Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::coprocessor::EndpointConfig;
 use crate::raftstore::store::fsm::HandlerBuilder;
 use crate::raftstore::store::transport::Transport;
+use engine::Engines;
 use pd_client::PdClient;
 use std::fmt::{self, Display, Formatter};
 use std::sync::atomic::Ordering;
@@ -141,8 +143,10 @@ where
 pub struct Runner<T, C> {
     cfg: DynamicConfig,
     last_raft_store_cfg: RaftStoreConfig,
+    cop_cfg: Arc<EndpointConfig>,
     apply_pool: PoolControl<ApplyFsm, ApplyControlFsm, T, C>,
     raft_pool: PoolControl<PeerFsm, StoreFsm, T, C>,
+    engines: Engines,
 }
 
 impl<T, C> Runner<T, C>
@@ -152,10 +156,12 @@ where
 {
     pub fn new(
         cfg: DynamicConfig,
+        cop_cfg: Arc<EndpointConfig>,
         apply_router: BatchRouter<ApplyFsm, ApplyControlFsm>,
         apply_state: PoolState<ApplyFsm, ApplyControlFsm, T, C>,
         raft_router: BatchRouter<PeerFsm, StoreFsm>,
         raft_state: PoolState<PeerFsm, StoreFsm, T, C>,
+        engines: Engines,
     ) -> Self {
         let apply_pool = PoolControl::new(apply_router, apply_state);
         let raft_pool = PoolControl::new(raft_router, raft_state);
@@ -163,8 +169,10 @@ where
         Runner {
             cfg,
             last_raft_store_cfg,
+            cop_cfg,
             apply_pool,
             raft_pool,
+            engines,
         }
     }
 
@@ -453,6 +461,57 @@ where
             self.last_raft_store_cfg.hibernate_regions = new.hibernate_regions;
             c.hibernate_regions = new.hibernate_regions;
         }
+    }
+
+    fn modify_rocksdb_config(
+        &mut self,
+        subsystems: &[String],
+        config_name: &String,
+        config_value: &String,
+    ) -> Result<(), String> {
+        use crate::server::CONFIG_ROCKSDB_GAUGE;
+        let db = if subsystems[0] == "raftdb" {
+            &self.engines.raft
+        } else {
+            &self.engines.kv
+        };
+        if subsystems.len() == 1 {
+            // [raftdb] name = value or [rokcsdb] name = value
+            db.set_db_options(&[(config_name, config_value)])
+                .map_err(|e| {
+                    format!(
+                        "set_db_options({:?} = {:?}) err: {:?}",
+                        config_name, config_value, e
+                    )
+                })?;
+        } else if subsystems.len() == 2
+            && subsystems[0] == "rocksdb"
+            && subsystems[1].ends_with("cf")
+        {
+            // [rocksdb.defaultcf] name = value
+            let cf = &subsystems[1];
+            // currently we can't modify block_cache_size via set_options_cf
+            if config_name == "block_cache_size" {
+                return Err("shared block cache is enabled, change cache size through \
+                            //      block_cache.capacity in storage module instead"
+                    .to_owned());
+            }
+            let handle = db
+                .cf_handle(cf)
+                .map_or(Err(format!("cf {} not found", cf)), Result::Ok)?;
+            let mut opt = Vec::new();
+            opt.push((config_name.as_str(), config_value.as_str()));
+            db.set_options_cf(handle, &opt[..])
+                .map_err(|e| format!("{:?}", e))?;
+            if let Ok(v) = config_value.parse::<f64>() {
+                CONFIG_ROCKSDB_GAUGE
+                    .with_label_values(&[&cf, &config_name])
+                    .set(v);
+            }
+        } else {
+            return Err(format!("bad argument: {}", config_name));
+        }
+        Ok(())
     }
 }
 

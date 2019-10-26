@@ -8,6 +8,7 @@ use super::transport::RaftStoreRouter;
 use super::RaftKv;
 use super::Result;
 use crate::config::TiKvConfig;
+use crate::coprocessor::EndpointConfig;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::dispatcher::CoprocessorHost;
 use crate::raftstore::store::fsm::store::StoreMeta;
@@ -112,6 +113,7 @@ where
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        cop_cfg: Arc<EndpointConfig>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -146,6 +148,7 @@ where
             store_meta,
             coprocessor_host,
             importer,
+            cop_cfg,
         )?;
 
         // Put store only if the cluster is bootstrapped.
@@ -316,6 +319,7 @@ where
         store_meta: Arc<Mutex<StoreMeta>>,
         coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        cop_cfg: Arc<EndpointConfig>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -340,6 +344,7 @@ where
             store_meta,
             coprocessor_host,
             importer,
+            cop_cfg,
         )?;
         Ok(())
     }
