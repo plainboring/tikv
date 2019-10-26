@@ -22,6 +22,7 @@ use time::{self, Timespec};
 use tokio_threadpool::{Sender as ThreadPoolSender, ThreadPool};
 
 use super::batch::PoolHandlerBuilder;
+use crate::coprocessor::EndpointConfig;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
 use crate::raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
@@ -971,6 +972,7 @@ impl RaftBatchSystem {
         store_meta: Arc<Mutex<StoreMeta>>,
         mut coprocessor_host: CoprocessorHost,
         importer: Arc<SSTImporter>,
+        cop_cfg: Arc<EndpointConfig>,
     ) -> Result<()> {
         assert!(self.workers.is_none());
         // TODO: we can get cluster meta regularly too later.
@@ -1019,7 +1021,7 @@ impl RaftBatchSystem {
             future_poller: workers.future_poller.sender().clone(),
         };
         let region_peers = builder.init()?;
-        self.start_system(workers, region_peers, builder)?;
+        self.start_system(workers, region_peers, builder, cop_cfg)?;
         Ok(())
     }
 
@@ -1028,6 +1030,7 @@ impl RaftBatchSystem {
         mut workers: Workers,
         region_peers: Vec<(LooseBoundedSender<PeerMsg>, Box<PeerFsm>)>,
         builder: RaftPollerBuilder<T, C>,
+        cop_cfg: Arc<EndpointConfig>,
     ) -> Result<()> {
         builder.snap_mgr.init()?;
 
@@ -1128,8 +1131,14 @@ impl RaftBatchSystem {
             .build_pool_state(PoolHandlerBuilder::Apply(apply_builder))
             .unwrap();
         let (raft_router, apply_router) = (self.router.clone(), self.apply_router.clone());
-        let config_runner =
-            ConfigRunner::new(dyn_cfg, apply_router, apply_pool, raft_router, raft_pool);
+        let config_runner = ConfigRunner::new(
+            dyn_cfg,
+            cop_cfg,
+            apply_router,
+            apply_pool,
+            raft_router,
+            raft_pool,
+        );
         box_try!(workers.config_worker.start(config_runner));
 
         let pd_runner = PdRunner::new(

@@ -223,6 +223,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         engine.clone(),
     );
     let cop = coprocessor::Endpoint::new(&server_cfg, cop_read_pool);
+    let cop_cfg = cop.get_cfg();
 
     let importer = Arc::new(SSTImporter::new(import_path).unwrap());
     let import_service = ImportSSTService::new(
@@ -312,6 +313,7 @@ fn run_raft_server(pd_client: RpcClient, cfg: &TiKvConfig, security_mgr: Arc<Sec
         store_meta,
         coprocessor_host,
         importer,
+        cop_cfg,
     )
     .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
     initial_metric(&cfg.metric, Some(node.id()));
