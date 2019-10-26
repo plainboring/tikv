@@ -1,12 +1,11 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-use kvproto::configpb;
-use std::fmt::{self, Display, Formatter};
-use std::sync::atomic::Ordering;
-// use std::sync::mpsc::{self, Sender};
 use crate::raftstore::store::fsm::HandlerBuilder;
 use crate::raftstore::store::transport::Transport;
+use kvproto::configpb;
 use pd_client::PdClient;
+use std::fmt::{self, Display, Formatter};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 
@@ -39,17 +38,37 @@ impl<N: Fsm, C: Fsm, PT, PC> PoolControl<N, C, PT, PC> {
         PoolControl { router, state }
     }
 }
+
 impl<N: Fsm, C: Fsm, PT, PC> PoolControl<N, C, PT, PC>
 where
     PT: Transport + 'static,
     PC: PdClient + 'static,
 {
-    fn resize_to(&mut self, size: usize) {}
+    fn resize_to(&mut self, size: usize) -> (bool, usize) {
+        let pool_size = self.state.pool_size.load(Ordering::AcqRel);
+        if pool_size > size {
+            return (true, pool_size - size);
+        }
+        (false, size - pool_size)
+    }
 
     fn decrease_by(&mut self, size: usize) {
+        let s = self.state.pool_size.load(Ordering::AcqRel);
         for _ in 0..size {
-            self.state.fsm_sender.send(FsmTypes::Empty);
+            if let Err(e) = self.state.fsm_sender.send(FsmTypes::Empty) {
+                error!(
+                    "failed to decrese threah pool";
+                    "decrease to" => size,
+                    "err" => %e,
+                );
+                return;
+            }
         }
+        info!(
+            "decrese threah pool";
+            "decrese to" => s+size,
+            "pool" => ?self.state.name_prefix
+        );
     }
 }
 
@@ -81,7 +100,8 @@ where
                 .unwrap();
             self.state.workers.lock().unwrap().push(t);
         }
-        let _ = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        let s = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        info!("increase thread pool"; "size" => s + size, "pool" => ?self.state.name_prefix);
     }
 }
 
@@ -113,7 +133,8 @@ where
                 .unwrap();
             self.state.workers.lock().unwrap().push(t);
         }
-        let _ = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        let s = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        info!("increase thread pool"; "size" => s + size, "pool" => ?self.state.name_prefix);
     }
 }
 
@@ -122,7 +143,11 @@ pub struct Runner<T, C> {
     raft_pool: PoolControl<PeerFsm, StoreFsm, T, C>,
 }
 
-impl<T, C> Runner<T, C> {
+impl<T, C> Runner<T, C>
+where
+    T: Transport + 'static,
+    C: PdClient + 'static,
+{
     pub fn new(
         apply_router: BatchRouter<ApplyFsm, ApplyControlFsm>,
         apply_state: PoolState<ApplyFsm, ApplyControlFsm, T, C>,
@@ -136,9 +161,29 @@ impl<T, C> Runner<T, C> {
             raft_pool,
         }
     }
+
+    fn resize_raft(&mut self, size: usize) {
+        match self.raft_pool.resize_to(size) {
+            (_, 0) => return,
+            (true, s) => self.raft_pool.decrease_by(s),
+            (false, s) => self.raft_pool.increase_raft_by(s),
+        }
+    }
+
+    fn resize_apply(&mut self, size: usize) {
+        match self.apply_pool.resize_to(size) {
+            (_, 0) => return,
+            (true, s) => self.apply_pool.decrease_by(s),
+            (false, s) => self.apply_pool.increase_apply_by(s),
+        }
+    }
 }
 
-impl<T, C> Runnable<Task> for Runner<T, C> {
+impl<T, C> Runnable<Task> for Runner<T, C>
+where
+    T: Transport + 'static,
+    C: PdClient + 'static,
+{
     fn run(&mut self, task: Task) {
         match task {
             Task::Update { cfg } => {

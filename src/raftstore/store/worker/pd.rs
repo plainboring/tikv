@@ -575,7 +575,14 @@ impl<T: PdClient> Runner<T> {
             .and_then(move |resp| {
                 let cfg_entries = resp.get_entry();
                 for cfg in cfg_entries {
-                    config_scheduler.schedule(ConfigTask::Update { cfg: cfg.clone() });
+                    let task = ConfigTask::Update { cfg: cfg.clone() };
+                    if let Err(e) = config_scheduler.schedule(task) {
+                        error!(
+                            "failed to schedule ConfigTask";
+                            "config task" => ?cfg,
+                            "err" => %e,
+                        );
+                    }
                 }
                 Ok(())
             })

@@ -432,6 +432,7 @@ where
             self.alive_workers.fetch_add(1, Ordering::AcqRel);
             self.workers.lock().unwrap().push(t);
         }
+        self.name_prefix.replace(name_prefix);
     }
 
     /// Shutdown the batch system and wait till all background threads exit.

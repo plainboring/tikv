@@ -12,8 +12,8 @@ mod router;
 pub mod store;
 
 pub use self::apply::{
-    create_apply_batch_system, Apply, ApplyBatchSystem, ApplyFsm, ApplyMetrics, ApplyRes,
-    ApplyRouter, Builder as ApplyPollerBuilder, CatchUpLogs, ChangePeer,
+    create_apply_batch_system, Apply, ApplyBatchSystem, ApplyFsm, ApplyMetrics, ApplyPoller,
+    ApplyRes, ApplyRouter, Builder as ApplyPollerBuilder, CatchUpLogs, ChangePeer,
     ControlFsm as ApplyControlFsm, ExecResult, GenSnapTask, Msg as ApplyTask,
     Notifier as ApplyNotifier, Proposal, RegionProposal, Registration, TaskRes as ApplyTaskRes,
 };
@@ -24,6 +24,6 @@ pub use self::batch::{
 pub use self::peer::{DestroyPeerJob, GroupState, PeerFsm};
 pub use self::router::{BasicMailbox, Mailbox};
 pub use self::store::{
-    create_raft_batch_system, new_compaction_listener, RaftBatchSystem, RaftPollerBuilder,
-    RaftRouter, StoreFsm, StoreInfo,
+    create_raft_batch_system, new_compaction_listener, RaftBatchSystem, RaftPoller,
+    RaftPollerBuilder, RaftRouter, StoreFsm, StoreInfo,
 };
