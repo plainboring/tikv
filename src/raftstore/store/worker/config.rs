@@ -45,7 +45,7 @@ where
     PC: PdClient + 'static,
 {
     fn resize_to(&mut self, size: usize) -> (bool, usize) {
-        let pool_size = self.state.pool_size.load(Ordering::AcqRel);
+        let pool_size = self.state.pool_size.load(Ordering::Relaxed);
         if pool_size > size {
             return (true, pool_size - size);
         }
@@ -53,7 +53,7 @@ where
     }
 
     fn decrease_by(&mut self, size: usize) {
-        let s = self.state.pool_size.load(Ordering::AcqRel);
+        let s = self.state.pool_size.load(Ordering::Relaxed);
         for _ in 0..size {
             if let Err(e) = self.state.fsm_sender.send(FsmTypes::Empty) {
                 error!(
@@ -79,7 +79,7 @@ where
 {
     fn increase_raft_by(&mut self, size: usize) {
         let name_prefix = self.state.name_prefix.clone();
-        let workers = self.state.workers.lock().unwrap();
+        let mut workers = self.state.workers.lock().unwrap();
         let id_base = workers.len();
         for i in 0..size {
             let handler = match &self.state.handler_builder {
@@ -98,9 +98,9 @@ where
                 .name(thd_name!(format!("{}-{}", name_prefix, i + id_base)))
                 .spawn(move || poller.poll())
                 .unwrap();
-            self.state.workers.lock().unwrap().push(t);
+            workers.push(t);
         }
-        let s = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        let s = self.state.pool_size.fetch_add(size, Ordering::Relaxed);
         info!("increase thread pool"; "size" => s + size, "pool" => ?self.state.name_prefix);
     }
 }
@@ -112,7 +112,7 @@ where
 {
     fn increase_apply_by(&mut self, size: usize) {
         let name_prefix = self.state.name_prefix.clone();
-        let workers = self.state.workers.lock().unwrap();
+        let mut workers = self.state.workers.lock().unwrap();
         let id_base = workers.len();
         for i in 0..size {
             let handler = match &self.state.handler_builder {
@@ -131,9 +131,9 @@ where
                 .name(thd_name!(format!("{}-{}", name_prefix, i + id_base)))
                 .spawn(move || poller.poll())
                 .unwrap();
-            self.state.workers.lock().unwrap().push(t);
+            workers.push(t);
         }
-        let s = self.state.pool_size.fetch_add(size, Ordering::AcqRel);
+        let s = self.state.pool_size.fetch_add(size, Ordering::Relaxed);
         info!("increase thread pool"; "size" => s + size, "pool" => ?self.state.name_prefix);
     }
 }
@@ -464,6 +464,10 @@ where
     fn run(&mut self, task: Task) {
         match task {
             Task::Update { cfg } => {
+                if cfg.is_empty() {
+                    info!("ignore empty config");
+                    return;
+                }
                 debug!("received config change request: {:?}", cfg);
                 match toml::from_str::<crate::config::TiKvConfig>(&cfg) {
                     Ok(tikvcfg) => self.update_raft_store_config(tikvcfg.raft_store),
