@@ -1,5 +1,6 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::coprocessor::EndpointConfig;
 use crate::raftstore::store::fsm::HandlerBuilder;
 use crate::raftstore::store::transport::Transport;
 use kvproto::configpb;
@@ -140,6 +141,7 @@ where
 
 pub struct Runner<T, C> {
     cfg: DynamicConfig,
+    cop_cfg: Arc<EndpointConfig>,
     apply_pool: PoolControl<ApplyFsm, ApplyControlFsm, T, C>,
     raft_pool: PoolControl<PeerFsm, StoreFsm, T, C>,
 }
@@ -151,6 +153,7 @@ where
 {
     pub fn new(
         cfg: DynamicConfig,
+        cop_cfg: Arc<EndpointConfig>,
         apply_router: BatchRouter<ApplyFsm, ApplyControlFsm>,
         apply_state: PoolState<ApplyFsm, ApplyControlFsm, T, C>,
         raft_router: BatchRouter<PeerFsm, StoreFsm>,
@@ -160,6 +163,7 @@ where
         let raft_pool = PoolControl::new(raft_router, raft_state);
         Runner {
             cfg,
+            cop_cfg,
             apply_pool,
             raft_pool,
         }

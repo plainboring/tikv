@@ -29,7 +29,7 @@ pub mod readpool_impl;
 mod statistics;
 mod tracker;
 
-pub use self::endpoint::Endpoint;
+pub use self::endpoint::{Endpoint, EndpointConfig};
 pub use self::error::{Error, Result};
 pub use checksum::checksum_crc64_xor;
 
