@@ -276,6 +276,7 @@ impl Notifier {
 
 struct ApplyContext {
     tag: String,
+    cfg: DynamicConfig,
     timer: Option<SlowTimer>,
     host: Arc<CoprocessorHost>,
     importer: Arc<SSTImporter>,
@@ -295,11 +296,11 @@ struct ApplyContext {
     committed_count: usize,
 
     // Indicates that WAL can be synchronized when data is written to KV engine.
-    enable_sync_log: bool,
+    // enable_sync_log: Arc<AtomicBool>,
     // Whether synchronize WAL is preferred.
     sync_log_hint: bool,
     // Whether to use the delete range API instead of deleting one by one.
-    use_delete_range: bool,
+    // use_delete_range: Arc<AtomicBool>,
 }
 
 impl ApplyContext {
@@ -311,9 +312,10 @@ impl ApplyContext {
         engines: Engines,
         router: BatchRouter<ApplyFsm, ControlFsm>,
         notifier: Notifier,
-        cfg: &Config,
+        cfg: DynamicConfig,
     ) -> ApplyContext {
         ApplyContext {
+            cfg,
             tag,
             timer: None,
             host,
@@ -329,10 +331,8 @@ impl ApplyContext {
             kv_wb_last_keys: 0,
             last_applied_index: 0,
             committed_count: 0,
-            enable_sync_log: cfg.sync_log,
             sync_log_hint: false,
             exec_ctx: None,
-            use_delete_range: cfg.use_delete_range,
         }
     }
 
@@ -377,7 +377,7 @@ impl ApplyContext {
     /// Writes all the changes into RocksDB.
     /// If it returns true, all pending writes are persisted in engines.
     pub fn write_to_db(&mut self) -> bool {
-        let need_sync = self.enable_sync_log && self.sync_log_hint;
+        let need_sync = self.cfg.get().sync_log && self.sync_log_hint;
         if self.kv_wb.as_ref().map_or(false, |wb| !wb.is_empty()) {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(need_sync);
@@ -1101,7 +1101,7 @@ impl ApplyDelegate {
                 CmdType::Put => self.handle_put(ctx, req),
                 CmdType::Delete => self.handle_delete(ctx, req),
                 CmdType::DeleteRange => {
-                    self.handle_delete_range(ctx, req, &mut ranges, ctx.use_delete_range)
+                    self.handle_delete_range(ctx, req, &mut ranges, ctx.cfg.get().use_delete_range)
                 }
                 CmdType::IngestSst => self.handle_ingest_sst(ctx, req, &mut ssts),
                 // Readonly commands are handled in raftstore directly.
@@ -2825,7 +2825,7 @@ impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
                 self.engines.clone(),
                 self.router.clone(),
                 self.sender.clone(),
-                &*self.cfg.get(),
+                self.cfg.clone(),
             ),
             messages_per_tick: self.cfg.get().messages_per_tick,
         }

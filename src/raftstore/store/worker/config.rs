@@ -68,7 +68,7 @@ where
         }
         info!(
             "decrese threah pool";
-            "decrese to" => s+size,
+            "decrese to" => s - size,
             "pool" => ?self.state.name_prefix
         );
     }
