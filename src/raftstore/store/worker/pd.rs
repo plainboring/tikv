@@ -20,6 +20,7 @@ use kvproto::raft_serverpb::RaftMessage;
 use prometheus::local::LocalHistogram;
 use raft::eraftpb::ConfChangeType;
 
+use super::config::Task as ConfigTask;
 use crate::raftstore::coprocessor::{get_region_approximate_keys, get_region_approximate_size};
 use crate::raftstore::store::cmd_resp::new_error;
 use crate::raftstore::store::util::is_epoch_stale;
@@ -33,7 +34,9 @@ use pd_client::{Error, PdClient, RegionStat};
 use tikv_util::collections::HashMap;
 use tikv_util::metrics::ThreadInfoStatistics;
 use tikv_util::time::time_now_sec;
-use tikv_util::worker::{FutureRunnable as Runnable, FutureScheduler as Scheduler, Stopped};
+use tikv_util::worker::{
+    FutureRunnable as FRunnable, FutureScheduler as FScheduler, Scheduler, Stopped,
+};
 
 type RecordPairVec = Vec<pdpb::RecordPair>;
 
@@ -218,14 +221,14 @@ fn convert_record_pairs(m: HashMap<String, u64>) -> RecordPairVec {
 }
 
 struct StatsMonitor {
-    scheduler: Scheduler<Task>,
+    scheduler: FScheduler<Task>,
     handle: Option<JoinHandle<()>>,
     sender: Option<Sender<bool>>,
     interval: Duration,
 }
 
 impl StatsMonitor {
-    pub fn new(interval: Duration, scheduler: Scheduler<Task>) -> Self {
+    pub fn new(interval: Duration, scheduler: FScheduler<Task>) -> Self {
         StatsMonitor {
             scheduler,
             handle: None,
@@ -296,7 +299,8 @@ pub struct Runner<T: PdClient> {
     // use for Runner inner handle function to send Task to itself
     // actually it is the sender connected to Runner's Worker which
     // calls Runner's run() on Task received.
-    scheduler: Scheduler<Task>,
+    scheduler: FScheduler<Task>,
+    config_scheduler: Scheduler<ConfigTask>,
     stats_monitor: StatsMonitor,
 }
 
@@ -308,7 +312,8 @@ impl<T: PdClient> Runner<T> {
         pd_client: Arc<T>,
         router: RaftRouter,
         db: Arc<DB>,
-        scheduler: Scheduler<Task>,
+        scheduler: FScheduler<Task>,
+        config_scheduler: Scheduler<ConfigTask>,
         store_heartbeat_interval: u64,
     ) -> Runner<T> {
         let interval = Duration::from_secs(store_heartbeat_interval) / Self::INTERVAL_DIVISOR;
@@ -327,6 +332,7 @@ impl<T: PdClient> Runner<T> {
             store_stat: StoreStat::default(),
             start_ts: time_now_sec(),
             scheduler,
+            config_scheduler,
             stats_monitor,
         }
     }
@@ -562,10 +568,27 @@ impl<T: PdClient> Runner<T> {
         STORE_SIZE_GAUGE_VEC
             .with_label_values(&["available"])
             .set(available as i64);
-
-        let f = self.pd_client.store_heartbeat(stats).map_err(|e| {
-            error!("store heartbeat failed"; "err" => ?e);
-        });
+        let config_scheduler = self.config_scheduler.clone();
+        let f = self
+            .pd_client
+            .store_heartbeat(stats)
+            .and_then(move |resp| {
+                let cfg_entries = resp.get_entry();
+                for cfg in cfg_entries {
+                    let task = ConfigTask::Update { cfg: cfg.clone() };
+                    if let Err(e) = config_scheduler.schedule(task) {
+                        error!(
+                            "failed to schedule ConfigTask";
+                            "config task" => ?cfg,
+                            "err" => %e,
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                error!("store heartbeat failed"; "err" => ?e);
+            });
         handle.spawn(f);
     }
 
@@ -776,7 +799,7 @@ impl<T: PdClient> Runner<T> {
     }
 }
 
-impl<T: PdClient> Runnable<Task> for Runner<T> {
+impl<T: PdClient> FRunnable<Task> for Runner<T> {
     fn run(&mut self, task: Task, handle: &Handle) {
         debug!("executing task"; "task" => %task);
 
@@ -1036,7 +1059,7 @@ mod tests {
     impl RunnerTest {
         fn new(
             interval: u64,
-            scheduler: Scheduler<Task>,
+            scheduler: FScheduler<Task>,
             store_stat: Arc<Mutex<StoreStat>>,
         ) -> RunnerTest {
             let mut stats_monitor =
@@ -1064,7 +1087,7 @@ mod tests {
         }
     }
 
-    impl Runnable<Task> for RunnerTest {
+    impl FRunnable<Task> for RunnerTest {
         fn run(&mut self, task: Task, _handle: &Handle) {
             if let Task::StoreInfos {
                 cpu_usages,

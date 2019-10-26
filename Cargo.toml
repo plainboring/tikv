@@ -144,6 +144,7 @@ rev = "7dd3d42f0c21384950afe6a46ed85352acf71625"
 "raft-proto:0.6.0-alpha" = { git = "https://github.com/pingcap/raft-rs", branch = "master" }
 "protobuf:2.8.0" = { git = "https://github.com/nrc/rust-protobuf", branch = "v2.8" }
 "protobuf-codegen:2.8.0" = { git = "https://github.com/nrc/rust-protobuf", branch = "v2.8" }
+"https://github.com/pingcap/kvproto.git#kvproto:0.0.2" = { git = "https://github.com/plainboring/kvproto.git", branch = "master" }
 
 [dev-dependencies]
 # See https://bheisler.github.io/criterion.rs/book/user_guide/known_limitations.html for the usage

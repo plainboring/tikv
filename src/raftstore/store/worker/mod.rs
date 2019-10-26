@@ -3,6 +3,7 @@
 mod cleanup;
 mod cleanup_sst;
 mod compact;
+mod config;
 mod consistency_check;
 mod metrics;
 mod pd;
@@ -14,6 +15,7 @@ mod split_check;
 pub use self::cleanup::{Runner as CleanupRunner, Task as CleanupTask};
 pub use self::cleanup_sst::{Runner as CleanupSSTRunner, Task as CleanupSSTTask};
 pub use self::compact::{Runner as CompactRunner, Task as CompactTask};
+pub use self::config::{Runner as ConfigRunner, Task as ConfigTask};
 pub use self::consistency_check::{Runner as ConsistencyCheckRunner, Task as ConsistencyCheckTask};
 pub use self::pd::{Runner as PdRunner, Task as PdTask};
 pub use self::raftlog_gc::{Runner as RaftlogGcRunner, Task as RaftlogGcTask};

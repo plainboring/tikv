@@ -2779,6 +2779,7 @@ impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
     }
 }
 
+#[derive(Clone)]
 pub struct Builder {
     tag: String,
     cfg: Arc<Config>,
@@ -2812,7 +2813,7 @@ impl Builder {
 impl HandlerBuilder<ApplyFsm, ControlFsm> for Builder {
     type Handler = ApplyPoller;
 
-    fn build(&mut self) -> ApplyPoller {
+    fn build(&self) -> ApplyPoller {
         ApplyPoller {
             msg_buf: Vec::with_capacity(self.cfg.messages_per_tick),
             apply_ctx: ApplyContext::new(

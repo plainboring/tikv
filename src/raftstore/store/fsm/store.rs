@@ -21,6 +21,7 @@ use std::{mem, thread, u64};
 use time::{self, Timespec};
 use tokio_threadpool::{Sender as ThreadPoolSender, ThreadPool};
 
+use super::batch::PoolHandlerBuilder;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
 use crate::raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
@@ -44,8 +45,9 @@ use crate::raftstore::store::transport::Transport;
 use crate::raftstore::store::util::is_initial_msg;
 use crate::raftstore::store::worker::{
     CleanupRunner, CleanupSSTRunner, CleanupSSTTask, CleanupTask, CompactRunner, CompactTask,
-    ConsistencyCheckRunner, ConsistencyCheckTask, PdRunner, RaftlogGcRunner, RaftlogGcTask,
-    ReadDelegate, RegionRunner, RegionTask, SplitCheckRunner, SplitCheckTask,
+    ConfigRunner, ConfigTask, ConsistencyCheckRunner, ConsistencyCheckTask, PdRunner,
+    RaftlogGcRunner, RaftlogGcTask, ReadDelegate, RegionRunner, RegionTask, SplitCheckRunner,
+    SplitCheckTask,
 };
 use crate::raftstore::store::PdTask;
 use crate::raftstore::store::{
@@ -675,6 +677,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 }
 
+#[derive(Clone)]
 pub struct RaftPollerBuilder<T, C> {
     pub cfg: Arc<Config>,
     pub store: metapb::Store,
@@ -684,6 +687,7 @@ pub struct RaftPollerBuilder<T, C> {
     cleanup_scheduler: Scheduler<CleanupTask>,
     raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     pub region_scheduler: Scheduler<RegionTask>,
+    pub config_scheduler: Scheduler<ConfigTask>,
     apply_router: ApplyRouter,
     pub router: RaftRouter,
     pub importer: Arc<SSTImporter>,
@@ -869,7 +873,7 @@ where
 {
     type Handler = RaftPoller<T, C>;
 
-    fn build(&mut self) -> RaftPoller<T, C> {
+    fn build(&self) -> RaftPoller<T, C> {
         let ctx = PollContext {
             cfg: self.cfg.clone(),
             store: self.store.clone(),
@@ -925,6 +929,7 @@ struct Workers {
     cleanup_worker: Worker<CleanupTask>,
     raftlog_gc_worker: Worker<RaftlogGcTask>,
     region_worker: Worker<RegionTask>,
+    config_worker: Worker<ConfigTask>,
     coprocessor_host: Arc<CoprocessorHost>,
     future_poller: ThreadPool,
 }
@@ -970,6 +975,7 @@ impl RaftBatchSystem {
             pd_worker,
             consistency_check_worker: Worker::new("consistency-check"),
             cleanup_worker: Worker::new("cleanup-worker"),
+            config_worker: Worker::new("config-worker"),
             raftlog_gc_worker: Worker::new("raft-gc-worker"),
             coprocessor_host: Arc::new(coprocessor_host),
             future_poller: tokio_threadpool::Builder::new()
@@ -985,6 +991,7 @@ impl RaftBatchSystem {
             split_check_scheduler: workers.split_check_worker.scheduler(),
             region_scheduler: workers.region_worker.scheduler(),
             pd_scheduler: workers.pd_worker.scheduler(),
+            config_scheduler: workers.config_worker.scheduler(),
             consistency_check_scheduler: workers.consistency_check_worker.scheduler(),
             cleanup_scheduler: workers.cleanup_worker.scheduler(),
             raftlog_gc_scheduler: workers.raftlog_gc_worker.scheduler(),
@@ -1044,6 +1051,8 @@ impl RaftBatchSystem {
                 .broadcast_normal(|| PeerMsg::HeartbeatPd);
         });
 
+        let (raft_builder, apply_builder) = (builder.clone(), apply_poller_builder.clone());
+
         let tag = format!("raftstore-{}", store.get_id());
         self.system.spawn(tag, builder);
         let mut mailboxes = Vec::with_capacity(region_peers.len());
@@ -1097,12 +1106,25 @@ impl RaftBatchSystem {
         let cleanup_runner = CleanupRunner::new(compact_runner, cleanup_sst_runner);
         box_try!(workers.cleanup_worker.start(cleanup_runner));
 
+        let raft_pool = self
+            .system
+            .build_pool_state(PoolHandlerBuilder::Raft(raft_builder))
+            .unwrap();
+        let apply_pool = self
+            .apply_system
+            .build_pool_state(PoolHandlerBuilder::Apply(apply_builder))
+            .unwrap();
+        let (raft_router, apply_router) = (self.router.clone(), self.apply_router.clone());
+        let config_runner = ConfigRunner::new(apply_router, apply_pool, raft_router, raft_pool);
+        box_try!(workers.config_worker.start(config_runner));
+
         let pd_runner = PdRunner::new(
             store.get_id(),
             Arc::clone(&pd_client),
             self.router.clone(),
             Arc::clone(&engines.kv),
             workers.pd_worker.scheduler(),
+            workers.config_worker.scheduler(),
             cfg.pd_store_heartbeat_tick_interval.as_secs(),
         );
         box_try!(workers.pd_worker.start(pd_runner));

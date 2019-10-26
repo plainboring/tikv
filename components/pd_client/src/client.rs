@@ -22,6 +22,7 @@ use tikv_util::{Either, HandyRwLock};
 const CQ_COUNT: usize = 1;
 const CLIENT_PREFIX: &str = "pd";
 
+#[derive(Clone)]
 pub struct RpcClient {
     cluster_id: u64,
     leader_client: LeaderClient,
@@ -175,7 +176,7 @@ impl PdClient for RpcClient {
         Ok(resp.get_id())
     }
 
-    fn put_store(&self, store: metapb::Store) -> Result<()> {
+    fn put_store(&self, store: metapb::Store, tikv_cfg: String) -> Result<()> {
         let _timer = PD_REQUEST_HISTOGRAM_VEC
             .with_label_values(&["put_store"])
             .start_coarse_timer();
@@ -183,6 +184,7 @@ impl PdClient for RpcClient {
         let mut req = pdpb::PutStoreRequest::default();
         req.set_header(self.header());
         req.set_store(store);
+        req.set_config(tikv_cfg);
 
         let resp = sync_request(&self.leader_client, LEADER_CHANGE_RETRY, |client| {
             client.put_store_opt(&req, Self::call_option())
@@ -421,7 +423,10 @@ impl PdClient for RpcClient {
             .execute()
     }
 
-    fn store_heartbeat(&self, mut stats: pdpb::StoreStats) -> PdFuture<()> {
+    fn store_heartbeat(
+        &self,
+        mut stats: pdpb::StoreStats,
+    ) -> PdFuture<pdpb::StoreHeartbeatResponse> {
         let timer = Instant::now();
 
         let mut req = pdpb::StoreHeartbeatRequest::default();
@@ -439,7 +444,7 @@ impl PdClient for RpcClient {
                     .with_label_values(&["store_heartbeat"])
                     .observe(duration_to_sec(timer.elapsed()));
                 check_resp_header(resp.get_header())?;
-                Ok(())
+                Ok(resp)
             })) as PdFuture<_>
         };
 
