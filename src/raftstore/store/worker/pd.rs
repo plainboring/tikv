@@ -572,17 +572,15 @@ impl<T: PdClient> Runner<T> {
         let f = self
             .pd_client
             .store_heartbeat(stats)
-            .and_then(move |resp| {
-                let cfg_entries = resp.get_entry();
-                for cfg in cfg_entries {
-                    let task = ConfigTask::Update { cfg: cfg.clone() };
-                    if let Err(e) = config_scheduler.schedule(task) {
-                        error!(
-                            "failed to schedule ConfigTask";
-                            "config task" => ?cfg,
-                            "err" => %e,
-                        );
-                    }
+            .and_then(move |mut resp| {
+                let cfg = resp.take_config();
+                info!("schedule config"; "config" => ?cfg);
+                let task = ConfigTask::Update { cfg };
+                if let Err(e) = config_scheduler.schedule(task) {
+                    error!(
+                        "failed to schedule ConfigTask";
+                        "err" => %e,
+                    );
                 }
                 Ok(())
             })

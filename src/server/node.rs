@@ -149,8 +149,8 @@ where
         )?;
 
         // Put store only if the cluster is bootstrapped.
-        info!("put store to PD"; "store" => ?&self.store);
         let tikv_cfg = ::toml::to_string(&self.tikv_cfg).unwrap();
+        info!("put store to PD"; "store" => ?&self.store, "cfg" => ?tikv_cfg);
         self.pd_client.put_store(self.store.clone(), tikv_cfg)?;
 
         Ok(())
