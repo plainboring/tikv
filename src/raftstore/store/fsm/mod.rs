@@ -24,6 +24,6 @@ pub use self::batch::{
 pub use self::peer::{DestroyPeerJob, GroupState, PeerFsm};
 pub use self::router::{BasicMailbox, Mailbox};
 pub use self::store::{
-    create_raft_batch_system, new_compaction_listener, RaftBatchSystem, RaftPoller,
+    create_raft_batch_system, new_compaction_listener, DynamicConfig, RaftBatchSystem, RaftPoller,
     RaftPollerBuilder, RaftRouter, StoreFsm, StoreInfo,
 };

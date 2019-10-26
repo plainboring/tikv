@@ -558,7 +558,7 @@ impl Peer {
         )?;
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
-        write_opts.set_sync(ctx.cfg.sync_log);
+        write_opts.set_sync(ctx.cfg.get().sync_log);
         ctx.engines.write_kv_opt(&kv_wb, &write_opts)?;
         ctx.engines.write_raft_opt(&raft_wb, &write_opts)?;
 
@@ -976,14 +976,14 @@ impl Peer {
                 self.leader_missing_time = Instant::now().into();
                 StaleState::Valid
             }
-            Some(instant) if instant.elapsed() >= ctx.cfg.max_leader_missing_duration.0 => {
+            Some(instant) if instant.elapsed() >= ctx.cfg.get().max_leader_missing_duration.0 => {
                 // Resets the `leader_missing_time` to avoid sending the same tasks to
                 // PD worker continuously during the leader missing timeout.
                 self.leader_missing_time = Instant::now().into();
                 StaleState::ToValidate
             }
             Some(instant)
-                if instant.elapsed() >= ctx.cfg.abnormal_leader_missing_duration.0
+                if instant.elapsed() >= ctx.cfg.get().abnormal_leader_missing_duration.0
                     && !naive_peer =>
             {
                 // A peer is considered as in the leader missing state
@@ -1814,7 +1814,7 @@ impl Peer {
         }
 
         if change_type == ConfChangeType::RemoveNode
-            && !ctx.cfg.allow_remove_leader
+            && !ctx.cfg.get().allow_remove_leader
             && peer.get_id() == self.peer_id()
         {
             warn!(
@@ -1912,7 +1912,7 @@ impl Peer {
         // on applied. TODO: fix the transfer leader issue in Raft.
         if self.raft_group.raft.has_pending_conf()
             || duration_to_sec(self.recent_conf_change_time.elapsed())
-                < ctx.cfg.raft_reject_transfer_leader_duration.as_secs() as f64
+                < ctx.cfg.get().raft_reject_transfer_leader_duration.as_secs() as f64
         {
             debug!(
                 "reject transfer leader due to the region was config changed recently";
@@ -1924,7 +1924,8 @@ impl Peer {
         }
 
         let last_index = self.get_store().last_index();
-        last_index <= progress.get(peer_id).unwrap().matched + ctx.cfg.leader_transfer_max_log_lag
+        last_index
+            <= progress.get(peer_id).unwrap().matched + ctx.cfg.get().leader_transfer_max_log_lag
     }
 
     fn read_local<T, C>(&mut self, ctx: &mut PollContext<T, C>, req: RaftCmdRequest, cb: Callback) {
@@ -1987,7 +1988,7 @@ impl Peer {
                 // heartbeat responses.
                 LeaseState::Valid | LeaseState::Expired => {
                     if let Some(read) = self.pending_reads.reads.back_mut() {
-                        let max_lease = poll_ctx.cfg.raft_store_max_leader_lease();
+                        let max_lease = poll_ctx.cfg.get().raft_store_max_leader_lease();
                         if read.renew_lease_time + max_lease > renew_lease_time {
                             read.push_command(req, cb);
                             return false;
@@ -2096,7 +2097,7 @@ impl Peer {
         let last_index = self.raft_group.raft.raft_log.last_index();
         let min_progress = self.get_min_progress()?;
         let min_index = min_progress + 1;
-        if min_progress == 0 || last_index - min_progress > ctx.cfg.merge_max_log_gap {
+        if min_progress == 0 || last_index - min_progress > ctx.cfg.get().merge_max_log_gap {
             return Err(box_err!(
                 "log gap ({}, {}] is too large, skip merge",
                 min_progress,
@@ -2131,7 +2132,7 @@ impl Peer {
                 cmd_type
             ));
         }
-        if entry_size as f64 > ctx.cfg.raft_entry_max_size.0 as f64 * 0.9 {
+        if entry_size as f64 > ctx.cfg.get().raft_entry_max_size.0 as f64 * 0.9 {
             return Err(box_err!(
                 "log gap size exceed entry size limit, skip merging."
             ));
@@ -2202,7 +2203,7 @@ impl Peer {
         // TODO: use local histogram metrics
         PEER_PROPOSE_LOG_SIZE_HISTOGRAM.observe(data.len() as f64);
 
-        if data.len() as u64 > poll_ctx.cfg.raft_entry_max_size.0 {
+        if data.len() as u64 > poll_ctx.cfg.get().raft_entry_max_size.0 {
             error!(
                 "entry is too large";
                 "region_id" => self.region_id,
@@ -2384,7 +2385,7 @@ impl Peer {
             term: self.term(),
             region: self.region().clone(),
             peer: self.peer.clone(),
-            down_peers: self.collect_down_peers(ctx.cfg.max_peer_down_duration.0),
+            down_peers: self.collect_down_peers(ctx.cfg.get().max_peer_down_duration.0),
             pending_peers: self.collect_pending_peers(),
             written_bytes: self.peer_stat.written_bytes,
             written_keys: self.peer_stat.written_keys,
