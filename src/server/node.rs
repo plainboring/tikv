@@ -330,12 +330,14 @@ where
             return Err(box_err!("{} is already started", store_id));
         }
         self.has_started = true;
-        let cfg = self.store_cfg.clone();
+        let tikv_cfg = self.tikv_cfg.clone();
+        let store_cfg = self.store_cfg.clone();
         let pd_client = Arc::clone(&self.pd_client);
         let store = self.store.clone();
         self.system.spawn(
             store,
-            cfg,
+            store_cfg,
+            tikv_cfg,
             engines,
             trans,
             pd_client,

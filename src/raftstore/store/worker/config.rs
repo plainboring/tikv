@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::config::TiKvConfig;
 use crate::coprocessor::EndpointConfig;
 use crate::raftstore::store::fsm::HandlerBuilder;
 use crate::raftstore::store::transport::Transport;
@@ -13,9 +14,7 @@ use std::thread;
 use crate::raftstore::store::fsm::{
     ApplyControlFsm, ApplyFsm, DynamicConfig, PeerFsm, PoolHandlerBuilder, StoreFsm,
 };
-use crate::raftstore::store::{
-    BatchRouter, Config as RaftStoreConfig, Fsm, FsmTypes, Poller, PoolState,
-};
+use crate::raftstore::store::{BatchRouter, Fsm, FsmTypes, Poller, PoolState};
 use tikv_util::worker::Runnable;
 
 pub enum Task {
@@ -142,7 +141,8 @@ where
 
 pub struct Runner<T, C> {
     cfg: DynamicConfig,
-    last_raft_store_cfg: RaftStoreConfig,
+    // last_raft_store_cfg: RaftStoreConfig,
+    last_cfg: TiKvConfig,
     cop_cfg: Arc<EndpointConfig>,
     apply_pool: PoolControl<ApplyFsm, ApplyControlFsm, T, C>,
     raft_pool: PoolControl<PeerFsm, StoreFsm, T, C>,
@@ -155,6 +155,7 @@ where
     C: PdClient + 'static,
 {
     pub fn new(
+        last_cfg: TiKvConfig,
         cfg: DynamicConfig,
         cop_cfg: Arc<EndpointConfig>,
         apply_router: BatchRouter<ApplyFsm, ApplyControlFsm>,
@@ -165,10 +166,11 @@ where
     ) -> Self {
         let apply_pool = PoolControl::new(apply_router, apply_state);
         let raft_pool = PoolControl::new(raft_router, raft_state);
-        let last_raft_store_cfg = cfg.get().clone();
+        // let last_raft_store_cfg = cfg.get().clone();
         Runner {
             cfg,
-            last_raft_store_cfg,
+            last_cfg,
+            // last_raft_store_cfg,
             cop_cfg,
             apply_pool,
             raft_pool,
@@ -192,290 +194,910 @@ where
         }
     }
 
-    fn update_raft_store_config(&mut self, new: RaftStoreConfig) {
-        if self.last_raft_store_cfg.apply_pool_size != new.apply_pool_size {
-            self.last_raft_store_cfg.apply_pool_size = new.apply_pool_size;
-            self.resize_apply(new.apply_pool_size);
+    fn update_config(&mut self, new: TiKvConfig) {
+        if self.last_cfg.raft_store.apply_pool_size != new.raft_store.apply_pool_size {
+            self.last_cfg.raft_store.apply_pool_size = new.raft_store.apply_pool_size;
+            self.resize_apply(new.raft_store.apply_pool_size);
         }
-        if self.last_raft_store_cfg.store_pool_size != new.store_pool_size {
-            self.last_raft_store_cfg.store_pool_size = new.store_pool_size;
-            self.resize_raft(new.store_pool_size);
+        if self.last_cfg.raft_store.store_pool_size != new.raft_store.store_pool_size {
+            self.last_cfg.raft_store.store_pool_size = new.raft_store.store_pool_size;
+            self.resize_raft(new.raft_store.store_pool_size);
         }
 
         let mut c = self.cfg.0.write().unwrap();
-        if self.last_raft_store_cfg.sync_log != new.sync_log {
-            self.last_raft_store_cfg.sync_log = new.sync_log;
-            c.sync_log = new.sync_log;
+        if self.last_cfg.raft_store.sync_log != new.raft_store.sync_log {
+            self.last_cfg.raft_store.sync_log = new.raft_store.sync_log;
+            c.sync_log = new.raft_store.sync_log;
         }
 
-        if self.last_raft_store_cfg.raft_base_tick_interval != new.raft_base_tick_interval {
-            self.last_raft_store_cfg.raft_base_tick_interval = new.raft_base_tick_interval;
-            c.raft_base_tick_interval = new.raft_base_tick_interval;
+        if self.last_cfg.raft_store.raft_base_tick_interval
+            != new.raft_store.raft_base_tick_interval
+        {
+            self.last_cfg.raft_store.raft_base_tick_interval =
+                new.raft_store.raft_base_tick_interval;
+            c.raft_base_tick_interval = new.raft_store.raft_base_tick_interval;
         }
 
-        if self.last_raft_store_cfg.raft_max_size_per_msg != new.raft_max_size_per_msg {
-            self.last_raft_store_cfg.raft_max_size_per_msg = new.raft_max_size_per_msg;
-            c.raft_max_size_per_msg = new.raft_max_size_per_msg;
+        if self.last_cfg.raft_store.raft_max_size_per_msg != new.raft_store.raft_max_size_per_msg {
+            self.last_cfg.raft_store.raft_max_size_per_msg = new.raft_store.raft_max_size_per_msg;
+            c.raft_max_size_per_msg = new.raft_store.raft_max_size_per_msg;
         }
 
-        if self.last_raft_store_cfg.raft_max_inflight_msgs != new.raft_max_inflight_msgs {
-            self.last_raft_store_cfg.raft_max_inflight_msgs = new.raft_max_inflight_msgs;
-            c.raft_max_inflight_msgs = new.raft_max_inflight_msgs;
+        if self.last_cfg.raft_store.raft_max_inflight_msgs != new.raft_store.raft_max_inflight_msgs
+        {
+            self.last_cfg.raft_store.raft_max_inflight_msgs = new.raft_store.raft_max_inflight_msgs;
+            c.raft_max_inflight_msgs = new.raft_store.raft_max_inflight_msgs;
         }
 
-        if self.last_raft_store_cfg.raft_entry_max_size != new.raft_entry_max_size {
-            self.last_raft_store_cfg.raft_entry_max_size = new.raft_entry_max_size;
-            c.raft_entry_max_size = new.raft_entry_max_size;
+        if self.last_cfg.raft_store.raft_entry_max_size != new.raft_store.raft_entry_max_size {
+            self.last_cfg.raft_store.raft_entry_max_size = new.raft_store.raft_entry_max_size;
+            c.raft_entry_max_size = new.raft_store.raft_entry_max_size;
         }
 
-        if self.last_raft_store_cfg.raft_log_gc_tick_interval != new.raft_log_gc_tick_interval {
-            self.last_raft_store_cfg.raft_log_gc_tick_interval = new.raft_log_gc_tick_interval;
-            c.raft_log_gc_tick_interval = new.raft_log_gc_tick_interval;
+        if self.last_cfg.raft_store.raft_log_gc_tick_interval
+            != new.raft_store.raft_log_gc_tick_interval
+        {
+            self.last_cfg.raft_store.raft_log_gc_tick_interval =
+                new.raft_store.raft_log_gc_tick_interval;
+            c.raft_log_gc_tick_interval = new.raft_store.raft_log_gc_tick_interval;
         }
 
-        if self.last_raft_store_cfg.raft_log_gc_threshold != new.raft_log_gc_threshold {
-            self.last_raft_store_cfg.raft_log_gc_threshold = new.raft_log_gc_threshold;
-            c.raft_log_gc_threshold = new.raft_log_gc_threshold;
+        if self.last_cfg.raft_store.raft_log_gc_threshold != new.raft_store.raft_log_gc_threshold {
+            self.last_cfg.raft_store.raft_log_gc_threshold = new.raft_store.raft_log_gc_threshold;
+            c.raft_log_gc_threshold = new.raft_store.raft_log_gc_threshold;
         }
 
-        if self.last_raft_store_cfg.raft_log_gc_count_limit != new.raft_log_gc_count_limit {
-            self.last_raft_store_cfg.raft_log_gc_count_limit = new.raft_log_gc_count_limit;
-            c.raft_log_gc_count_limit = new.raft_log_gc_count_limit;
+        if self.last_cfg.raft_store.raft_log_gc_count_limit
+            != new.raft_store.raft_log_gc_count_limit
+        {
+            self.last_cfg.raft_store.raft_log_gc_count_limit =
+                new.raft_store.raft_log_gc_count_limit;
+            c.raft_log_gc_count_limit = new.raft_store.raft_log_gc_count_limit;
         }
 
-        if self.last_raft_store_cfg.raft_log_gc_size_limit != new.raft_log_gc_size_limit {
-            self.last_raft_store_cfg.raft_log_gc_size_limit = new.raft_log_gc_size_limit;
-            c.raft_log_gc_size_limit = new.raft_log_gc_size_limit;
+        if self.last_cfg.raft_store.raft_log_gc_size_limit != new.raft_store.raft_log_gc_size_limit
+        {
+            self.last_cfg.raft_store.raft_log_gc_size_limit = new.raft_store.raft_log_gc_size_limit;
+            c.raft_log_gc_size_limit = new.raft_store.raft_log_gc_size_limit;
         }
 
-        if self.last_raft_store_cfg.raft_entry_cache_life_time != new.raft_entry_cache_life_time {
-            self.last_raft_store_cfg.raft_entry_cache_life_time = new.raft_entry_cache_life_time;
-            c.raft_entry_cache_life_time = new.raft_entry_cache_life_time;
+        if self.last_cfg.raft_store.raft_entry_cache_life_time
+            != new.raft_store.raft_entry_cache_life_time
+        {
+            self.last_cfg.raft_store.raft_entry_cache_life_time =
+                new.raft_store.raft_entry_cache_life_time;
+            c.raft_entry_cache_life_time = new.raft_store.raft_entry_cache_life_time;
         }
 
         if self
-            .last_raft_store_cfg
+            .last_cfg
+            .raft_store
             .raft_reject_transfer_leader_duration
-            != new.raft_reject_transfer_leader_duration
+            != new.raft_store.raft_reject_transfer_leader_duration
         {
-            self.last_raft_store_cfg
-                .raft_reject_transfer_leader_duration = new.raft_reject_transfer_leader_duration;
-            c.raft_reject_transfer_leader_duration = new.raft_reject_transfer_leader_duration;
+            self.last_cfg
+                .raft_store
+                .raft_reject_transfer_leader_duration =
+                new.raft_store.raft_reject_transfer_leader_duration;
+            c.raft_reject_transfer_leader_duration =
+                new.raft_store.raft_reject_transfer_leader_duration;
         }
 
-        if self.last_raft_store_cfg.split_region_check_tick_interval
-            != new.split_region_check_tick_interval
+        if self.last_cfg.raft_store.split_region_check_tick_interval
+            != new.raft_store.split_region_check_tick_interval
         {
-            self.last_raft_store_cfg.split_region_check_tick_interval =
-                new.split_region_check_tick_interval;
-            c.split_region_check_tick_interval = new.split_region_check_tick_interval;
+            self.last_cfg.raft_store.split_region_check_tick_interval =
+                new.raft_store.split_region_check_tick_interval;
+            c.split_region_check_tick_interval = new.raft_store.split_region_check_tick_interval;
         }
 
-        if self.last_raft_store_cfg.region_split_check_diff != new.region_split_check_diff {
-            self.last_raft_store_cfg.region_split_check_diff = new.region_split_check_diff;
-            c.region_split_check_diff = new.region_split_check_diff;
-        }
-
-        if self.last_raft_store_cfg.region_compact_check_interval
-            != new.region_compact_check_interval
+        if self.last_cfg.raft_store.region_split_check_diff
+            != new.raft_store.region_split_check_diff
         {
-            self.last_raft_store_cfg.region_compact_check_interval =
-                new.region_compact_check_interval;
-            c.region_compact_check_interval = new.region_compact_check_interval;
+            self.last_cfg.raft_store.region_split_check_diff =
+                new.raft_store.region_split_check_diff;
+            c.region_split_check_diff = new.raft_store.region_split_check_diff;
         }
 
-        if self.last_raft_store_cfg.clean_stale_peer_delay != new.clean_stale_peer_delay {
-            self.last_raft_store_cfg.clean_stale_peer_delay = new.clean_stale_peer_delay;
-            c.clean_stale_peer_delay = new.clean_stale_peer_delay;
-        }
-
-        if self.last_raft_store_cfg.region_compact_check_step != new.region_compact_check_step {
-            self.last_raft_store_cfg.region_compact_check_step = new.region_compact_check_step;
-            c.region_compact_check_step = new.region_compact_check_step;
-        }
-
-        if self.last_raft_store_cfg.region_compact_min_tombstones
-            != new.region_compact_min_tombstones
+        if self.last_cfg.raft_store.region_compact_check_interval
+            != new.raft_store.region_compact_check_interval
         {
-            self.last_raft_store_cfg.region_compact_min_tombstones =
-                new.region_compact_min_tombstones;
-            c.region_compact_min_tombstones = new.region_compact_min_tombstones;
+            self.last_cfg.raft_store.region_compact_check_interval =
+                new.raft_store.region_compact_check_interval;
+            c.region_compact_check_interval = new.raft_store.region_compact_check_interval;
         }
 
-        if self.last_raft_store_cfg.region_compact_tombstones_percent
-            != new.region_compact_tombstones_percent
+        if self.last_cfg.raft_store.clean_stale_peer_delay != new.raft_store.clean_stale_peer_delay
         {
-            self.last_raft_store_cfg.region_compact_tombstones_percent =
-                new.region_compact_tombstones_percent;
-            c.region_compact_tombstones_percent = new.region_compact_tombstones_percent;
+            self.last_cfg.raft_store.clean_stale_peer_delay = new.raft_store.clean_stale_peer_delay;
+            c.clean_stale_peer_delay = new.raft_store.clean_stale_peer_delay;
         }
 
-        if self.last_raft_store_cfg.pd_heartbeat_tick_interval != new.pd_heartbeat_tick_interval {
-            self.last_raft_store_cfg.pd_heartbeat_tick_interval = new.pd_heartbeat_tick_interval;
-            c.pd_heartbeat_tick_interval = new.pd_heartbeat_tick_interval;
-        }
-
-        if self.last_raft_store_cfg.pd_store_heartbeat_tick_interval
-            != new.pd_store_heartbeat_tick_interval
+        if self.last_cfg.raft_store.region_compact_check_step
+            != new.raft_store.region_compact_check_step
         {
-            self.last_raft_store_cfg.pd_store_heartbeat_tick_interval =
-                new.pd_store_heartbeat_tick_interval;
-            c.pd_store_heartbeat_tick_interval = new.pd_store_heartbeat_tick_interval;
+            self.last_cfg.raft_store.region_compact_check_step =
+                new.raft_store.region_compact_check_step;
+            c.region_compact_check_step = new.raft_store.region_compact_check_step;
         }
 
-        if self.last_raft_store_cfg.snap_mgr_gc_tick_interval != new.snap_mgr_gc_tick_interval {
-            self.last_raft_store_cfg.snap_mgr_gc_tick_interval = new.snap_mgr_gc_tick_interval;
-            c.snap_mgr_gc_tick_interval = new.snap_mgr_gc_tick_interval;
-        }
-
-        if self.last_raft_store_cfg.snap_gc_timeout != new.snap_gc_timeout {
-            self.last_raft_store_cfg.snap_gc_timeout = new.snap_gc_timeout;
-            c.snap_gc_timeout = new.snap_gc_timeout;
-        }
-
-        if self.last_raft_store_cfg.lock_cf_compact_interval != new.lock_cf_compact_interval {
-            self.last_raft_store_cfg.lock_cf_compact_interval = new.lock_cf_compact_interval;
-            c.lock_cf_compact_interval = new.lock_cf_compact_interval;
-        }
-
-        if self.last_raft_store_cfg.lock_cf_compact_bytes_threshold
-            != new.lock_cf_compact_bytes_threshold
+        if self.last_cfg.raft_store.region_compact_min_tombstones
+            != new.raft_store.region_compact_min_tombstones
         {
-            self.last_raft_store_cfg.lock_cf_compact_bytes_threshold =
-                new.lock_cf_compact_bytes_threshold;
-            c.lock_cf_compact_bytes_threshold = new.lock_cf_compact_bytes_threshold;
+            self.last_cfg.raft_store.region_compact_min_tombstones =
+                new.raft_store.region_compact_min_tombstones;
+            c.region_compact_min_tombstones = new.raft_store.region_compact_min_tombstones;
         }
 
-        if self.last_raft_store_cfg.notify_capacity != new.notify_capacity {
-            self.last_raft_store_cfg.notify_capacity = new.notify_capacity;
-            c.notify_capacity = new.notify_capacity;
-        }
-
-        if self.last_raft_store_cfg.messages_per_tick != new.messages_per_tick {
-            self.last_raft_store_cfg.messages_per_tick = new.messages_per_tick;
-            c.messages_per_tick = new.messages_per_tick;
-        }
-
-        if self.last_raft_store_cfg.max_peer_down_duration != new.max_peer_down_duration {
-            self.last_raft_store_cfg.max_peer_down_duration = new.max_peer_down_duration;
-            c.max_peer_down_duration = new.max_peer_down_duration;
-        }
-
-        if self.last_raft_store_cfg.max_leader_missing_duration != new.max_leader_missing_duration {
-            self.last_raft_store_cfg.max_leader_missing_duration = new.max_leader_missing_duration;
-            c.max_leader_missing_duration = new.max_leader_missing_duration;
-        }
-
-        if self.last_raft_store_cfg.abnormal_leader_missing_duration
-            != new.abnormal_leader_missing_duration
+        if self.last_cfg.raft_store.region_compact_tombstones_percent
+            != new.raft_store.region_compact_tombstones_percent
         {
-            self.last_raft_store_cfg.abnormal_leader_missing_duration =
-                new.abnormal_leader_missing_duration;
-            c.abnormal_leader_missing_duration = new.abnormal_leader_missing_duration;
+            self.last_cfg.raft_store.region_compact_tombstones_percent =
+                new.raft_store.region_compact_tombstones_percent;
+            c.region_compact_tombstones_percent = new.raft_store.region_compact_tombstones_percent;
         }
 
-        if self.last_raft_store_cfg.peer_stale_state_check_interval
-            != new.peer_stale_state_check_interval
+        if self.last_cfg.raft_store.pd_heartbeat_tick_interval
+            != new.raft_store.pd_heartbeat_tick_interval
         {
-            self.last_raft_store_cfg.peer_stale_state_check_interval =
-                new.peer_stale_state_check_interval;
-            c.peer_stale_state_check_interval = new.peer_stale_state_check_interval;
+            self.last_cfg.raft_store.pd_heartbeat_tick_interval =
+                new.raft_store.pd_heartbeat_tick_interval;
+            c.pd_heartbeat_tick_interval = new.raft_store.pd_heartbeat_tick_interval;
         }
 
-        if self.last_raft_store_cfg.leader_transfer_max_log_lag != new.leader_transfer_max_log_lag {
-            self.last_raft_store_cfg.leader_transfer_max_log_lag = new.leader_transfer_max_log_lag;
-            c.leader_transfer_max_log_lag = new.leader_transfer_max_log_lag;
+        if self.last_cfg.raft_store.pd_store_heartbeat_tick_interval
+            != new.raft_store.pd_store_heartbeat_tick_interval
+        {
+            self.last_cfg.raft_store.pd_store_heartbeat_tick_interval =
+                new.raft_store.pd_store_heartbeat_tick_interval;
+            c.pd_store_heartbeat_tick_interval = new.raft_store.pd_store_heartbeat_tick_interval;
         }
 
-        if self.last_raft_store_cfg.snap_apply_batch_size != new.snap_apply_batch_size {
-            self.last_raft_store_cfg.snap_apply_batch_size = new.snap_apply_batch_size;
-            c.snap_apply_batch_size = new.snap_apply_batch_size;
+        if self.last_cfg.raft_store.snap_mgr_gc_tick_interval
+            != new.raft_store.snap_mgr_gc_tick_interval
+        {
+            self.last_cfg.raft_store.snap_mgr_gc_tick_interval =
+                new.raft_store.snap_mgr_gc_tick_interval;
+            c.snap_mgr_gc_tick_interval = new.raft_store.snap_mgr_gc_tick_interval;
         }
 
-        if self.last_raft_store_cfg.consistency_check_interval != new.consistency_check_interval {
-            self.last_raft_store_cfg.consistency_check_interval = new.consistency_check_interval;
-            c.consistency_check_interval = new.consistency_check_interval;
+        if self.last_cfg.raft_store.snap_gc_timeout != new.raft_store.snap_gc_timeout {
+            self.last_cfg.raft_store.snap_gc_timeout = new.raft_store.snap_gc_timeout;
+            c.snap_gc_timeout = new.raft_store.snap_gc_timeout;
         }
 
-        if self.last_raft_store_cfg.report_region_flow_interval != new.report_region_flow_interval {
-            self.last_raft_store_cfg.report_region_flow_interval = new.report_region_flow_interval;
-            c.report_region_flow_interval = new.report_region_flow_interval;
+        if self.last_cfg.raft_store.lock_cf_compact_interval
+            != new.raft_store.lock_cf_compact_interval
+        {
+            self.last_cfg.raft_store.lock_cf_compact_interval =
+                new.raft_store.lock_cf_compact_interval;
+            c.lock_cf_compact_interval = new.raft_store.lock_cf_compact_interval;
         }
 
-        if self.last_raft_store_cfg.raft_store_max_leader_lease != new.raft_store_max_leader_lease {
-            self.last_raft_store_cfg.raft_store_max_leader_lease = new.raft_store_max_leader_lease;
-            c.raft_store_max_leader_lease = new.raft_store_max_leader_lease;
+        if self.last_cfg.raft_store.lock_cf_compact_bytes_threshold
+            != new.raft_store.lock_cf_compact_bytes_threshold
+        {
+            self.last_cfg.raft_store.lock_cf_compact_bytes_threshold =
+                new.raft_store.lock_cf_compact_bytes_threshold;
+            c.lock_cf_compact_bytes_threshold = new.raft_store.lock_cf_compact_bytes_threshold;
         }
 
-        if self.last_raft_store_cfg.right_derive_when_split != new.right_derive_when_split {
-            self.last_raft_store_cfg.right_derive_when_split = new.right_derive_when_split;
-            c.right_derive_when_split = new.right_derive_when_split;
+        if self.last_cfg.raft_store.notify_capacity != new.raft_store.notify_capacity {
+            self.last_cfg.raft_store.notify_capacity = new.raft_store.notify_capacity;
+            c.notify_capacity = new.raft_store.notify_capacity;
         }
 
-        if self.last_raft_store_cfg.allow_remove_leader != new.allow_remove_leader {
-            self.last_raft_store_cfg.allow_remove_leader = new.allow_remove_leader;
-            c.allow_remove_leader = new.allow_remove_leader;
+        if self.last_cfg.raft_store.messages_per_tick != new.raft_store.messages_per_tick {
+            self.last_cfg.raft_store.messages_per_tick = new.raft_store.messages_per_tick;
+            c.messages_per_tick = new.raft_store.messages_per_tick;
         }
 
-        if self.last_raft_store_cfg.merge_max_log_gap != new.merge_max_log_gap {
-            self.last_raft_store_cfg.merge_max_log_gap = new.merge_max_log_gap;
-            c.merge_max_log_gap = new.merge_max_log_gap;
+        if self.last_cfg.raft_store.max_peer_down_duration != new.raft_store.max_peer_down_duration
+        {
+            self.last_cfg.raft_store.max_peer_down_duration = new.raft_store.max_peer_down_duration;
+            c.max_peer_down_duration = new.raft_store.max_peer_down_duration;
         }
 
-        if self.last_raft_store_cfg.merge_check_tick_interval != new.merge_check_tick_interval {
-            self.last_raft_store_cfg.merge_check_tick_interval = new.merge_check_tick_interval;
-            c.merge_check_tick_interval = new.merge_check_tick_interval;
+        if self.last_cfg.raft_store.max_leader_missing_duration
+            != new.raft_store.max_leader_missing_duration
+        {
+            self.last_cfg.raft_store.max_leader_missing_duration =
+                new.raft_store.max_leader_missing_duration;
+            c.max_leader_missing_duration = new.raft_store.max_leader_missing_duration;
         }
 
-        if self.last_raft_store_cfg.use_delete_range != new.use_delete_range {
-            self.last_raft_store_cfg.use_delete_range = new.use_delete_range;
-            c.use_delete_range = new.use_delete_range;
+        if self.last_cfg.raft_store.abnormal_leader_missing_duration
+            != new.raft_store.abnormal_leader_missing_duration
+        {
+            self.last_cfg.raft_store.abnormal_leader_missing_duration =
+                new.raft_store.abnormal_leader_missing_duration;
+            c.abnormal_leader_missing_duration = new.raft_store.abnormal_leader_missing_duration;
         }
 
-        if self.last_raft_store_cfg.cleanup_import_sst_interval != new.cleanup_import_sst_interval {
-            self.last_raft_store_cfg.cleanup_import_sst_interval = new.cleanup_import_sst_interval;
-            c.cleanup_import_sst_interval = new.cleanup_import_sst_interval;
+        if self.last_cfg.raft_store.peer_stale_state_check_interval
+            != new.raft_store.peer_stale_state_check_interval
+        {
+            self.last_cfg.raft_store.peer_stale_state_check_interval =
+                new.raft_store.peer_stale_state_check_interval;
+            c.peer_stale_state_check_interval = new.raft_store.peer_stale_state_check_interval;
         }
 
-        if self.last_raft_store_cfg.local_read_batch_size != new.local_read_batch_size {
-            self.last_raft_store_cfg.local_read_batch_size = new.local_read_batch_size;
-            c.local_read_batch_size = new.local_read_batch_size;
+        if self.last_cfg.raft_store.leader_transfer_max_log_lag
+            != new.raft_store.leader_transfer_max_log_lag
+        {
+            self.last_cfg.raft_store.leader_transfer_max_log_lag =
+                new.raft_store.leader_transfer_max_log_lag;
+            c.leader_transfer_max_log_lag = new.raft_store.leader_transfer_max_log_lag;
         }
 
-        if self.last_raft_store_cfg.apply_max_batch_size != new.apply_max_batch_size {
-            self.last_raft_store_cfg.apply_max_batch_size = new.apply_max_batch_size;
-            c.apply_max_batch_size = new.apply_max_batch_size;
+        if self.last_cfg.raft_store.snap_apply_batch_size != new.raft_store.snap_apply_batch_size {
+            self.last_cfg.raft_store.snap_apply_batch_size = new.raft_store.snap_apply_batch_size;
+            c.snap_apply_batch_size = new.raft_store.snap_apply_batch_size;
         }
 
-        if self.last_raft_store_cfg.store_max_batch_size != new.store_max_batch_size {
-            self.last_raft_store_cfg.store_max_batch_size = new.store_max_batch_size;
-            c.store_max_batch_size = new.store_max_batch_size;
+        if self.last_cfg.raft_store.consistency_check_interval
+            != new.raft_store.consistency_check_interval
+        {
+            self.last_cfg.raft_store.consistency_check_interval =
+                new.raft_store.consistency_check_interval;
+            c.consistency_check_interval = new.raft_store.consistency_check_interval;
         }
 
-        if self.last_raft_store_cfg.future_poll_size != new.future_poll_size {
-            self.last_raft_store_cfg.future_poll_size = new.future_poll_size;
-            c.future_poll_size = new.future_poll_size;
+        if self.last_cfg.raft_store.report_region_flow_interval
+            != new.raft_store.report_region_flow_interval
+        {
+            self.last_cfg.raft_store.report_region_flow_interval =
+                new.raft_store.report_region_flow_interval;
+            c.report_region_flow_interval = new.raft_store.report_region_flow_interval;
         }
 
-        if self.last_raft_store_cfg.hibernate_regions != new.hibernate_regions {
-            self.last_raft_store_cfg.hibernate_regions = new.hibernate_regions;
-            c.hibernate_regions = new.hibernate_regions;
+        if self.last_cfg.raft_store.raft_store_max_leader_lease
+            != new.raft_store.raft_store_max_leader_lease
+        {
+            self.last_cfg.raft_store.raft_store_max_leader_lease =
+                new.raft_store.raft_store_max_leader_lease;
+            c.raft_store_max_leader_lease = new.raft_store.raft_store_max_leader_lease;
         }
+
+        if self.last_cfg.raft_store.right_derive_when_split
+            != new.raft_store.right_derive_when_split
+        {
+            self.last_cfg.raft_store.right_derive_when_split =
+                new.raft_store.right_derive_when_split;
+            c.right_derive_when_split = new.raft_store.right_derive_when_split;
+        }
+
+        if self.last_cfg.raft_store.allow_remove_leader != new.raft_store.allow_remove_leader {
+            self.last_cfg.raft_store.allow_remove_leader = new.raft_store.allow_remove_leader;
+            c.allow_remove_leader = new.raft_store.allow_remove_leader;
+        }
+
+        if self.last_cfg.raft_store.merge_max_log_gap != new.raft_store.merge_max_log_gap {
+            self.last_cfg.raft_store.merge_max_log_gap = new.raft_store.merge_max_log_gap;
+            c.merge_max_log_gap = new.raft_store.merge_max_log_gap;
+        }
+
+        if self.last_cfg.raft_store.merge_check_tick_interval
+            != new.raft_store.merge_check_tick_interval
+        {
+            self.last_cfg.raft_store.merge_check_tick_interval =
+                new.raft_store.merge_check_tick_interval;
+            c.merge_check_tick_interval = new.raft_store.merge_check_tick_interval;
+        }
+
+        if self.last_cfg.raft_store.use_delete_range != new.raft_store.use_delete_range {
+            self.last_cfg.raft_store.use_delete_range = new.raft_store.use_delete_range;
+            c.use_delete_range = new.raft_store.use_delete_range;
+        }
+
+        if self.last_cfg.raft_store.cleanup_import_sst_interval
+            != new.raft_store.cleanup_import_sst_interval
+        {
+            self.last_cfg.raft_store.cleanup_import_sst_interval =
+                new.raft_store.cleanup_import_sst_interval;
+            c.cleanup_import_sst_interval = new.raft_store.cleanup_import_sst_interval;
+        }
+
+        if self.last_cfg.raft_store.local_read_batch_size != new.raft_store.local_read_batch_size {
+            self.last_cfg.raft_store.local_read_batch_size = new.raft_store.local_read_batch_size;
+            c.local_read_batch_size = new.raft_store.local_read_batch_size;
+        }
+
+        if self.last_cfg.raft_store.apply_max_batch_size != new.raft_store.apply_max_batch_size {
+            self.last_cfg.raft_store.apply_max_batch_size = new.raft_store.apply_max_batch_size;
+            c.apply_max_batch_size = new.raft_store.apply_max_batch_size;
+        }
+
+        if self.last_cfg.raft_store.store_max_batch_size != new.raft_store.store_max_batch_size {
+            self.last_cfg.raft_store.store_max_batch_size = new.raft_store.store_max_batch_size;
+            c.store_max_batch_size = new.raft_store.store_max_batch_size;
+        }
+
+        if self.last_cfg.raft_store.future_poll_size != new.raft_store.future_poll_size {
+            self.last_cfg.raft_store.future_poll_size = new.raft_store.future_poll_size;
+            c.future_poll_size = new.raft_store.future_poll_size;
+        }
+
+        if self.last_cfg.raft_store.hibernate_regions != new.raft_store.hibernate_regions {
+            self.last_cfg.raft_store.hibernate_regions = new.raft_store.hibernate_regions;
+            c.hibernate_regions = new.raft_store.hibernate_regions;
+        }
+
+        macro_rules! modi_db {
+            ($db:ident, $self:ident, $newc:ident, $name:ident) => {
+                if $self.last_cfg.$db.$name != $newc.$db.$name {
+                    $self.last_cfg.$db.$name = $newc.$db.$name.clone();
+                    if let Err(e) = $self.modify_rocksdb_config(
+                        &String::from(stringify!($db)),
+                        None,
+                        &String::from(stringify!($name)),
+                        &format!("{:?}", $newc.rocksdb.$name),
+                    ) {
+                        info!("fail to modify db config {:}", e);
+                    }
+                }
+            };
+        }
+
+        modi_db!(rocksdb, self, new, wal_recovery_mode);
+        modi_db!(rocksdb, self, new, wal_dir);
+        modi_db!(rocksdb, self, new, wal_ttl_seconds);
+        modi_db!(rocksdb, self, new, wal_size_limit);
+        modi_db!(rocksdb, self, new, max_total_wal_size);
+        modi_db!(rocksdb, self, new, max_background_jobs);
+        modi_db!(rocksdb, self, new, max_manifest_file_size);
+        modi_db!(rocksdb, self, new, create_if_missing);
+        modi_db!(rocksdb, self, new, max_open_files);
+        modi_db!(rocksdb, self, new, enable_statistics);
+        modi_db!(rocksdb, self, new, stats_dump_period);
+        modi_db!(rocksdb, self, new, compaction_readahead_size);
+        modi_db!(rocksdb, self, new, info_log_max_size);
+        modi_db!(rocksdb, self, new, info_log_roll_time);
+        modi_db!(rocksdb, self, new, info_log_keep_log_file_num);
+        modi_db!(rocksdb, self, new, info_log_dir);
+        modi_db!(rocksdb, self, new, rate_bytes_per_sec);
+        modi_db!(rocksdb, self, new, rate_limiter_mode);
+        modi_db!(rocksdb, self, new, auto_tuned);
+        modi_db!(rocksdb, self, new, bytes_per_sync);
+        modi_db!(rocksdb, self, new, max_sub_compactions);
+        modi_db!(rocksdb, self, new, writable_file_max_buffer_size);
+        modi_db!(rocksdb, self, new, use_direct_io_for_flush_and_compaction);
+        modi_db!(rocksdb, self, new, enable_pipelined_write);
+
+        modi_db!(raftdb, self, new, wal_recovery_mode);
+        modi_db!(raftdb, self, new, wal_dir);
+        modi_db!(raftdb, self, new, wal_ttl_seconds);
+        modi_db!(raftdb, self, new, wal_size_limit);
+        modi_db!(raftdb, self, new, max_total_wal_size);
+        modi_db!(raftdb, self, new, max_background_jobs);
+        modi_db!(raftdb, self, new, max_manifest_file_size);
+        modi_db!(raftdb, self, new, create_if_missing);
+        modi_db!(raftdb, self, new, max_open_files);
+        modi_db!(raftdb, self, new, enable_statistics);
+        modi_db!(raftdb, self, new, stats_dump_period);
+        modi_db!(raftdb, self, new, compaction_readahead_size);
+        modi_db!(raftdb, self, new, info_log_max_size);
+        modi_db!(raftdb, self, new, info_log_roll_time);
+        modi_db!(raftdb, self, new, info_log_keep_log_file_num);
+        modi_db!(raftdb, self, new, info_log_dir);
+        modi_db!(raftdb, self, new, max_sub_compactions);
+        modi_db!(raftdb, self, new, writable_file_max_buffer_size);
+        modi_db!(raftdb, self, new, use_direct_io_for_flush_and_compaction);
+        modi_db!(raftdb, self, new, enable_pipelined_write);
+        // modi_db!(raftdb, self, new, allow_concurrent_memtable_write);
+        modi_db!(raftdb, self, new, bytes_per_sync);
+        modi_db!(raftdb, self, new, wal_bytes_per_sync);
+
+        macro_rules! modi_db_cf {
+            ($db:ident, $cf:ident, $cf_name:ident, $self:ident, $newc:ident, $name:ident) => {
+                if $self.last_cfg.$db.$cf_name.$name != $newc.$db.$cf_name.$name {
+                    $self.last_cfg.$db.$cf_name.$name = $newc.$db.$cf_name.$name.clone();
+                    if let Err(e) = $self.modify_rocksdb_config(
+                        &String::from(stringify!($db)),
+                        Some(&String::from(stringify!($cf))),
+                        &String::from(stringify!($name)),
+                        &format!("{:?}", $newc.$db.$cf_name.$name),
+                    ) {
+                        info!("fail to modify db config {:}", e);
+                    }
+                }
+            };
+        }
+
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, block_size);
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, block_cache_size);
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, disable_block_cache);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            cache_index_and_filter_blocks
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            pin_l0_filter_and_index_blocks
+        );
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, use_bloom_filter);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            optimize_filters_for_hits
+        );
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, whole_key_filtering);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            bloom_filter_bits_per_key
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            block_based_bloom_filter
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            read_amp_bytes_per_bit
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            compression_per_level
+        );
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, write_buffer_size);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            max_write_buffer_number
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            min_write_buffer_number_to_merge
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            max_bytes_for_level_base
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            target_file_size_base
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            level0_file_num_compaction_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            level0_slowdown_writes_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            level0_stop_writes_trigger
+        );
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, max_compaction_bytes);
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, compaction_pri);
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, dynamic_level_bytes);
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, num_levels);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            max_bytes_for_level_multiplier
+        );
+        modi_db_cf!(rocksdb, default, defaultcf, self, new, compaction_style);
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            disable_auto_compactions
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            soft_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            hard_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            force_consistency_checks
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            prop_size_index_distance
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            prop_keys_index_distance
+        );
+        modi_db_cf!(
+            rocksdb,
+            default,
+            defaultcf,
+            self,
+            new,
+            enable_doubly_skiplist
+        );
+
+        modi_db_cf!(rocksdb, write, writecf, self, new, block_size);
+        modi_db_cf!(rocksdb, write, writecf, self, new, block_cache_size);
+        modi_db_cf!(rocksdb, write, writecf, self, new, disable_block_cache);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            cache_index_and_filter_blocks
+        );
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            pin_l0_filter_and_index_blocks
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, use_bloom_filter);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            optimize_filters_for_hits
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, whole_key_filtering);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            bloom_filter_bits_per_key
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, block_based_bloom_filter);
+        modi_db_cf!(rocksdb, write, writecf, self, new, read_amp_bytes_per_bit);
+        modi_db_cf!(rocksdb, write, writecf, self, new, compression_per_level);
+        modi_db_cf!(rocksdb, write, writecf, self, new, write_buffer_size);
+        modi_db_cf!(rocksdb, write, writecf, self, new, max_write_buffer_number);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            min_write_buffer_number_to_merge
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, max_bytes_for_level_base);
+        modi_db_cf!(rocksdb, write, writecf, self, new, target_file_size_base);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            level0_file_num_compaction_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            level0_slowdown_writes_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            level0_stop_writes_trigger
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, max_compaction_bytes);
+        modi_db_cf!(rocksdb, write, writecf, self, new, compaction_pri);
+        modi_db_cf!(rocksdb, write, writecf, self, new, dynamic_level_bytes);
+        modi_db_cf!(rocksdb, write, writecf, self, new, num_levels);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            max_bytes_for_level_multiplier
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, compaction_style);
+        modi_db_cf!(rocksdb, write, writecf, self, new, disable_auto_compactions);
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            soft_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(
+            rocksdb,
+            write,
+            writecf,
+            self,
+            new,
+            hard_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(rocksdb, write, writecf, self, new, force_consistency_checks);
+        modi_db_cf!(rocksdb, write, writecf, self, new, prop_size_index_distance);
+        modi_db_cf!(rocksdb, write, writecf, self, new, prop_keys_index_distance);
+        modi_db_cf!(rocksdb, write, writecf, self, new, enable_doubly_skiplist);
+
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, block_size);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, block_cache_size);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, disable_block_cache);
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            cache_index_and_filter_blocks
+        );
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            pin_l0_filter_and_index_blocks
+        );
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, use_bloom_filter);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, optimize_filters_for_hits);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, whole_key_filtering);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, bloom_filter_bits_per_key);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, block_based_bloom_filter);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, read_amp_bytes_per_bit);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, compression_per_level);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, write_buffer_size);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, max_write_buffer_number);
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            min_write_buffer_number_to_merge
+        );
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, max_bytes_for_level_base);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, target_file_size_base);
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            level0_file_num_compaction_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            level0_slowdown_writes_trigger
+        );
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, level0_stop_writes_trigger);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, max_compaction_bytes);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, compaction_pri);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, dynamic_level_bytes);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, num_levels);
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            max_bytes_for_level_multiplier
+        );
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, compaction_style);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, disable_auto_compactions);
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            soft_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(
+            rocksdb,
+            lock,
+            lockcf,
+            self,
+            new,
+            hard_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, force_consistency_checks);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, prop_size_index_distance);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, prop_keys_index_distance);
+        modi_db_cf!(rocksdb, lock, lockcf, self, new, enable_doubly_skiplist);
+
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, block_size);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, block_cache_size);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, disable_block_cache);
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            cache_index_and_filter_blocks
+        );
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            pin_l0_filter_and_index_blocks
+        );
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, use_bloom_filter);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, optimize_filters_for_hits);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, whole_key_filtering);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, bloom_filter_bits_per_key);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, block_based_bloom_filter);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, read_amp_bytes_per_bit);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, compression_per_level);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, write_buffer_size);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, max_write_buffer_number);
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            min_write_buffer_number_to_merge
+        );
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, max_bytes_for_level_base);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, target_file_size_base);
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            level0_file_num_compaction_trigger
+        );
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            level0_slowdown_writes_trigger
+        );
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, level0_stop_writes_trigger);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, max_compaction_bytes);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, compaction_pri);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, dynamic_level_bytes);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, num_levels);
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            max_bytes_for_level_multiplier
+        );
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, compaction_style);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, disable_auto_compactions);
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            soft_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(
+            rocksdb,
+            raft,
+            raftcf,
+            self,
+            new,
+            hard_pending_compaction_bytes_limit
+        );
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, force_consistency_checks);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, prop_size_index_distance);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, prop_keys_index_distance);
+        modi_db_cf!(rocksdb, raft, raftcf, self, new, enable_doubly_skiplist);
     }
 
     fn modify_rocksdb_config(
-        &mut self,
-        subsystems: &[String],
-        config_name: &String,
-        config_value: &String,
+        &self,
+        db_name: &str,
+        cf_name: Option<&str>,
+        config_name: &str,
+        config_value: &str,
     ) -> Result<(), String> {
         use crate::server::CONFIG_ROCKSDB_GAUGE;
-        let db = if subsystems[0] == "raftdb" {
+        let db = if db_name == "raftdb" {
             &self.engines.raft
         } else {
             &self.engines.kv
         };
-        if subsystems.len() == 1 {
+        if cf_name.is_none() {
             // [raftdb] name = value or [rokcsdb] name = value
             db.set_db_options(&[(config_name, config_value)])
                 .map_err(|e| {
@@ -484,12 +1106,9 @@ where
                         config_name, config_value, e
                     )
                 })?;
-        } else if subsystems.len() == 2
-            && subsystems[0] == "rocksdb"
-            && subsystems[1].ends_with("cf")
-        {
+        } else {
+            let cf_name = cf_name.unwrap();
             // [rocksdb.defaultcf] name = value
-            let cf = &subsystems[1];
             // currently we can't modify block_cache_size via set_options_cf
             if config_name == "block_cache_size" {
                 return Err("shared block cache is enabled, change cache size through \
@@ -497,19 +1116,17 @@ where
                     .to_owned());
             }
             let handle = db
-                .cf_handle(cf)
-                .map_or(Err(format!("cf {} not found", cf)), Result::Ok)?;
+                .cf_handle(cf_name)
+                .map_or(Err(format!("cf {} not found", cf_name)), Result::Ok)?;
             let mut opt = Vec::new();
-            opt.push((config_name.as_str(), config_value.as_str()));
+            opt.push((config_name, config_value));
             db.set_options_cf(handle, &opt[..])
                 .map_err(|e| format!("{:?}", e))?;
             if let Ok(v) = config_value.parse::<f64>() {
                 CONFIG_ROCKSDB_GAUGE
-                    .with_label_values(&[&cf, &config_name])
+                    .with_label_values(&[&cf_name, &config_name])
                     .set(v);
             }
-        } else {
-            return Err(format!("bad argument: {}", config_name));
         }
         Ok(())
     }
@@ -529,7 +1146,7 @@ where
                 }
                 debug!("received config change request: {:?}", cfg);
                 match toml::from_str::<crate::config::TiKvConfig>(&cfg) {
-                    Ok(tikvcfg) => self.update_raft_store_config(tikvcfg.raft_store),
+                    Ok(tikvcfg) => self.update_config(tikvcfg),
                     Err(e) => {
                         error!("update config failed"; "error" => ?e);
                     }
