@@ -9,6 +9,7 @@ use super::router::{BasicMailbox, Router};
 use super::{ApplyPollerBuilder, RaftPollerBuilder};
 use crossbeam::channel::{self, SendError, TryRecvError};
 use std::borrow::Cow;
+use std::ops::DerefMut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -258,6 +259,36 @@ pub trait PollHandler<N, C> {
 
     /// This function is called when batch system is going to sleep.
     fn pause(&mut self) {}
+}
+
+impl<N, C, T> PollHandler<N, C> for Box<T>
+where
+    T: PollHandler<N, C>,
+{
+    fn begin(&mut self, batch_size: usize) {
+        let s = DerefMut::deref_mut(self);
+        s.begin(batch_size)
+    }
+
+    fn handle_control(&mut self, control: &mut C) -> Option<usize> {
+        let s = DerefMut::deref_mut(self);
+        s.handle_control(control)
+    }
+
+    fn handle_normal(&mut self, normal: &mut N) -> Option<usize> {
+        let s = DerefMut::deref_mut(self);
+        s.handle_normal(normal)
+    }
+
+    fn end(&mut self, batch: &mut [Box<N>]) {
+        let s = DerefMut::deref_mut(self);
+        s.end(batch)
+    }
+
+    fn pause(&mut self) {
+        let s = DerefMut::deref_mut(self);
+        s.pause()
+    }
 }
 
 /// Internal poller that fetches batch and call handler hooks for readiness.

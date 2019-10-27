@@ -22,6 +22,7 @@ use time::{self, Timespec};
 use tokio_threadpool::{Sender as ThreadPoolSender, ThreadPool};
 
 use super::batch::PoolHandlerBuilder;
+use crate::config::TiKvConfig;
 use crate::coprocessor::EndpointConfig;
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
@@ -964,6 +965,7 @@ impl RaftBatchSystem {
         &mut self,
         meta: metapb::Store,
         mut cfg: Config,
+        tikv_cfg: TiKvConfig,
         engines: Engines,
         trans: T,
         pd_client: Arc<C>,
@@ -1021,7 +1023,7 @@ impl RaftBatchSystem {
             future_poller: workers.future_poller.sender().clone(),
         };
         let region_peers = builder.init()?;
-        self.start_system(workers, region_peers, builder, cop_cfg)?;
+        self.start_system(workers, region_peers, builder, cop_cfg, tikv_cfg)?;
         Ok(())
     }
 
@@ -1031,6 +1033,7 @@ impl RaftBatchSystem {
         region_peers: Vec<(LooseBoundedSender<PeerMsg>, Box<PeerFsm>)>,
         builder: RaftPollerBuilder<T, C>,
         cop_cfg: Arc<EndpointConfig>,
+        tikv_cfg: TiKvConfig,
     ) -> Result<()> {
         builder.snap_mgr.init()?;
 
@@ -1132,6 +1135,7 @@ impl RaftBatchSystem {
             .unwrap();
         let (raft_router, apply_router) = (self.router.clone(), self.apply_router.clone());
         let config_runner = ConfigRunner::new(
+            tikv_cfg,
             dyn_cfg,
             cop_cfg,
             apply_router,
